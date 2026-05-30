@@ -305,27 +305,35 @@ app.get("/api/nass/planted-acres", async (req, res) => {
   const cached = getCached(ck);
   if (cached) return res.json({ ...cached, cached: true });
 
-  const params = new URLSearchParams({
-    key: NASS_KEY,
-    commodity_desc: crop,
-    statisticcat_desc: "AREA PLANTED",
-    unit_desc: "ACRES",
-    agg_level_desc: "STATE",
-    state_alpha: state,
-    format: "JSON",
-  });
-  if (req.query.year) params.set("year", String(req.query.year));
-  else params.set("year__GE", "2021");
-
-  try {
+  // Query one acreage series for this crop/state; returns null if the series
+  // doesn't exist (NASS 400) or has no usable rows.
+  const queryAcres = async (stat) => {
+    const params = new URLSearchParams({
+      key: NASS_KEY,
+      commodity_desc: crop,
+      statisticcat_desc: stat,
+      unit_desc: "ACRES",
+      agg_level_desc: "STATE",
+      state_alpha: state,
+      format: "JSON",
+    });
+    if (req.query.year) params.set("year", String(req.query.year));
+    else params.set("year__GE", "2021");
     const r = await fetch(`https://quickstats.nass.usda.gov/api/api_GET/?${params}`);
-    if (!r.ok) return res.status(r.status).json({ error: `NASS ${r.status}` });
+    if (!r.ok) return null; // 400 = no such series for this commodity
     const json = await r.json();
     const rows = (json.data || []).filter((x) => x.Value && x.Value !== "(D)");
-    if (!rows.length) return res.json({ crop, state, acres: null, note: "no rows" });
+    if (!rows.length) return null;
     rows.sort((a, b) => Number(b.year) - Number(a.year));
-    const acres = Number(String(rows[0].Value).replace(/,/g, ""));
-    const out = { crop, state, year: rows[0].year, acres };
+    return { acres: Number(String(rows[0].Value).replace(/,/g, "")), year: rows[0].year, stat };
+  };
+
+  try {
+    // Fresh produce often reports AREA HARVESTED but not AREA PLANTED, and tree
+    // crops (apples) report neither as PLANTED — fall back so every crop resolves.
+    const hit = (await queryAcres("AREA PLANTED")) || (await queryAcres("AREA HARVESTED"));
+    if (!hit) return res.json({ crop, state, acres: null, note: "no rows" });
+    const out = { crop, state, year: hit.year, acres: hit.acres, stat: hit.stat };
     setCached(ck, out, 1000 * 60 * 60 * 12); // 12h
     res.json(out);
   } catch (e) {

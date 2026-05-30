@@ -105,26 +105,29 @@ export default function FieldLossEstimator() {
     return () => { cancelled = true; };
   }, [stateCode]);
 
-  // NASS planted acres (live attempt -> graceful fallback)
-  const [nassKey, setNassKey] = useState("");
+  // NASS acres — auto-pulled from the proxy (same-origin) on load and whenever
+  // the crop or state changes. The proxy keeps the key server-side and falls
+  // back to AREA HARVESTED for crops with no AREA PLANTED series (e.g. apples).
   const [nassMsg, setNassMsg] = useState("");
-  function fetchNass() {
-    if (!nassKey.trim()) { setNassMsg("Enter a NASS key to attempt a live pull."); return; }
-    setNassMsg("Requesting…");
-    const q = `https://quickstats.nass.usda.gov/api/api_GET/?key=${encodeURIComponent(nassKey.trim())}` +
-      `&commodity_desc=${CROPS[cropKey].nass}&statisticcat_desc=AREA PLANTED&unit_desc=ACRES` +
-      `&agg_level_desc=STATE&state_alpha=${stateCode}&year__GE=2022&format=JSON`;
-    fetch(q)
-      .then((r) => r.json())
+  useEffect(() => {
+    let cancelled = false;
+    setNassMsg("Loading live acres…");
+    fetch(`/api/nass/planted-acres?crop=${CROPS[cropKey].nass}&state=${stateCode}`)
+      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`proxy ${r.status}`))))
       .then((d) => {
-        const rows = (d.data || []).filter((x) => x.Value && x.Value !== "(D)");
-        if (!rows.length) { setNassMsg("No matching planted-acreage rows returned."); return; }
-        rows.sort((x, y) => Number(y.year) - Number(x.year));
-        const v = Number(String(rows[0].Value).replace(/,/g, ""));
-        if (v > 0) { setAcres(v); setAcresSource("nass"); setNassMsg(`Live: ${rows[0].year} planted acres loaded.`); }
+        if (cancelled) return;
+        if (d.acres > 0) {
+          setAcres(d.acres);
+          setAcresSource("nass");
+          const stat = d.stat === "AREA HARVESTED" ? "harvested" : "planted";
+          setNassMsg(`Live: ${d.year} ${stat} acres from USDA NASS.`);
+        } else {
+          setNassMsg("No NASS acreage for this crop/state — using your value.");
+        }
       })
-      .catch(() => setNassMsg("Browser CORS blocked the call — wire NASS through a backend proxy in production. Using current value."));
-  }
+      .catch(() => { if (!cancelled) setNassMsg("Live pull unavailable (is the proxy running?) — using your value."); });
+    return () => { cancelled = true; };
+  }, [cropKey, stateCode]);
 
   // ---- the model ----
   const m = useMemo(() => {
@@ -263,16 +266,12 @@ export default function FieldLossEstimator() {
 
         {/* NASS */}
         <div className="card" style={{ padding: "18px 18px", marginBottom: 18 }}>
-          <SectionTitle>USDA NASS Quick Stats (optional live pull)</SectionTitle>
-          <div style={{ display: "flex", gap: 10, alignItems: "flex-end", flexWrap: "wrap" }}>
-            <div style={{ flex: 1, minWidth: 220 }}>
-              <Field label="NASS API key">
-                <input type="text" value={nassKey} onChange={(e) => setNassKey(e.target.value)} placeholder="quickstats.nass.usda.gov/api" style={selStyle} />
-              </Field>
-            </div>
-            <button onClick={fetchNass} style={btnStyle}>Pull planted acres</button>
-          </div>
-          {nassMsg && <p style={{ fontSize: 12, color: C.sub, margin: "10px 0 0" }} className="mono">{nassMsg}</p>}
+          <SectionTitle>USDA NASS Quick Stats (live acreage)</SectionTitle>
+          <p style={{ fontSize: 12.5, color: C.sub, margin: 0, lineHeight: 1.6 }}>
+            Planted acres load automatically for the selected crop and state via the
+            data service — no key needed. Edit the acreage above to override.
+          </p>
+          {nassMsg && <p style={{ fontSize: 12, color: acresSource === "nass" ? C.field : C.gold, margin: "10px 0 0" }} className="mono">{nassMsg}</p>}
         </div>
 
         {/* sources / caveats */}
@@ -294,7 +293,6 @@ export default function FieldLossEstimator() {
 
 // ---- small components ----
 const selStyle = { width: "100%", padding: "8px 10px", border: `1px solid ${C.line}`, borderRadius: 7, background: "#fff", color: C.ink, fontSize: 13, boxSizing: "border-box" };
-const btnStyle = { padding: "9px 16px", background: C.field, color: "#fff", border: "none", borderRadius: 7, fontSize: 13, cursor: "pointer", fontFamily: "'IBM Plex Mono',monospace" };
 
 function Field({ label, children }) {
   return (
