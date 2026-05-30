@@ -358,29 +358,47 @@ const MARS_REPORTS = {
   WHEAT: "3346",
 };
 
+// Farm-gate price via NASS "PRICE RECEIVED" (uses the existing NASS key, not
+// Market News). Normalized to $/CWT — the display unit for every modeled crop.
+// $ / LB -> ×100 ; $ / TON -> ÷20 ; $ / CWT -> as-is. Other units are skipped.
+const PRICE_UNIT_TO_CWT = { "$ / LB": 100, "$ / CWT": 1, "$ / TON": 1 / 20 };
 app.get("/api/price", async (req, res) => {
   const crop = String(req.query.crop || "").toUpperCase();
-  if (!AMS_KEY) return res.status(500).json({ error: "AMS_KEY not configured" });
-  const slug = MARS_REPORTS[crop];
-  if (!slug) return res.status(400).json({ error: `no report mapped for ${crop}` });
+  if (!NASS_KEY) return res.status(500).json({ error: "NASS_KEY not configured" });
+  if (!crop) return res.status(400).json({ error: "crop required" });
 
   const ck = `price:${crop}`;
   const cached = getCached(ck);
   if (cached) return res.json({ ...cached, cached: true });
 
-  const auth = "Basic " + Buffer.from(`${AMS_KEY}:`).toString("base64");
-  const url = `https://marsapi.ams.usda.gov/services/v1.2/reports/${slug}?q=commodity=${encodeURIComponent(crop)}`;
+  const params = new URLSearchParams({
+    key: NASS_KEY,
+    commodity_desc: crop,
+    statisticcat_desc: "PRICE RECEIVED",
+    agg_level_desc: "NATIONAL",
+    year__GE: String(new Date().getUTCFullYear() - 4),
+    format: "JSON",
+  });
   try {
-    const r = await fetch(url, { headers: { Authorization: auth } });
-    if (!r.ok) return res.status(r.status).json({ error: `MARS ${r.status}` });
+    const r = await fetch(`https://quickstats.nass.usda.gov/api/api_GET/?${params}`);
+    if (!r.ok) return res.json({ crop, price: null, note: `NASS ${r.status}` });
     const json = await r.json();
-    // NOTE: response shape varies by report. Adapt this extraction to the
-    // report you map above — pull the price field + unit you want to model.
-    const out = { crop, raw: json, note: "adapt extraction to chosen report" };
-    setCached(ck, out, 1000 * 60 * 60 * 6); // 6h
+    const rows = (json.data || []).filter(
+      (x) => x.Value && x.Value !== "(D)" && PRICE_UNIT_TO_CWT[x.unit_desc] != null
+    );
+    if (!rows.length) return res.json({ crop, price: null, note: "no price rows" });
+    // latest year; within it prefer a FRESH class over processing/other.
+    rows.sort((a, b) => Number(b.year) - Number(a.year));
+    const latest = rows.filter((x) => x.year === rows[0].year);
+    const pick = latest.find((x) => /FRESH/.test(x.class_desc || "")) || latest[0];
+    const raw = Number(String(pick.Value).replace(/,/g, ""));
+    const price = +(raw * PRICE_UNIT_TO_CWT[pick.unit_desc]).toFixed(2);
+    const out = { crop, price, unit: "$ / CWT", year: pick.year,
+      srcUnit: pick.unit_desc, class: pick.class_desc || null };
+    setCached(ck, out, 1000 * 60 * 60 * 12); // 12h
     res.json(out);
   } catch (e) {
-    res.status(502).json({ error: "MARS fetch failed", detail: String(e) });
+    res.status(502).json({ error: "NASS price fetch failed", detail: String(e) });
   }
 });
 

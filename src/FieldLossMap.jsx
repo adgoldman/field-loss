@@ -76,8 +76,9 @@ function lerpColor(a,b,t){const A=hex2rgb(a),B=hex2rgb(b);const m=A.map((v,i)=>M
 // Abandonment is MEASURED from the planted−harvested gap when both exist (same year);
 // otherwise it falls back to the economic (margin) model. Production uses real NASS
 // yield when its unit matches the crop, else the assumed coefficient.
-function modelState(crop, area, wx) {
+function modelState(crop, area, wx, priceOverride) {
   const c = CROPS[crop];
+  const price = Number(priceOverride) > 0 ? Number(priceOverride) : c.price; // live NASS farm-gate price, else default
   const planted = Number(area?.planted) || 0;
   const harvestedRaw = Number(area?.harvested) || 0;
   const yUnit = String(area?.yieldUnit || "").toUpperCase();
@@ -96,7 +97,7 @@ function modelState(crop, area, wx) {
     abandonSource = "measured";
   } else {
     const acres = planted || harvestedRaw || 0;
-    const marginRatio = c.price > 0 ? (c.price - c.harvestCost) / c.price : -1;
+    const marginRatio = price > 0 ? (price - c.harvestCost) / price : -1;
     fAband = clamp(0.015 + 0.60 / (1 + Math.exp(14 * (marginRatio - 0.18))), 0, 0.65);
     gross = acres * yieldPerAc;
     abandonedVol = gross * fAband;
@@ -120,7 +121,7 @@ function modelState(crop, area, wx) {
              {k:"Lost during harvest",v:harvestLoss,t:tons(harvestLoss),c:C.gold},
              {k:"Weather/spoilage",v:weatherLoss,t:tons(weatherLoss),c:C.teal},
              ...(unsoldRate>0?[{k:"Harvested · unsold",v:unsoldVol,t:tons(unsoldVol),c:C.clay}]:[])],
-    totalTons: tons(totalVol), totalUSD: totalVol*c.price, pct: gross>0?totalVol/gross:0 };
+    totalTons: tons(totalVol), totalUSD: totalVol*price, pct: gross>0?totalVol/gross:0 };
 }
 
 export default function FieldLossMap({ onDrill }) {
@@ -128,6 +129,7 @@ export default function FieldLossMap({ onDrill }) {
   const [metric, setMetric] = useState("tons"); // tons | usd | pct
   const [wx, setWx] = useState({ status:"loading", byState:{} });
   const [sel, setSel] = useState(null);
+  const [livePrice, setLivePrice] = useState(null); // NASS farm-gate $/cwt, national
   // per-state area: live NASS {planted,harvested,yield} via proxy, SHARES as fallback
   const [acresInfo, setAcresInfo] = useState(() => {
     const byState = {};
@@ -156,6 +158,17 @@ export default function FieldLossMap({ onDrill }) {
         setAcresInfo({ status:"ok", source:`NASS ${d.states[0].year || ""} (live)`, byState });
       })
       .catch(() => !cancelled && fallback());
+    return () => { cancelled = true; };
+  }, [crop]);
+
+  // national farm-gate price (NASS PRICE RECEIVED, $/cwt) — drives $ totals and
+  // the economic-abandonment fallback; null leaves the static default in place.
+  useEffect(() => {
+    let cancelled = false;
+    setLivePrice(null);
+    fetch(`${DEFAULT_PROXY}/api/price?crop=${CROPS[crop].nass}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(d => { if (!cancelled && d && d.price > 0) setLivePrice(d); });
     return () => { cancelled = true; };
   }, [crop]);
 
@@ -195,14 +208,14 @@ export default function FieldLossMap({ onDrill }) {
       const area=acresInfo.byState[s];
       const acres=area?(Number(area.planted)||Number(area.harvested)||0):0;
       if(acres<=0){ out[s]={acres:0}; return; }
-      const m=modelState(crop,area,wx.byState[s]);
+      const m=modelState(crop,area,wx.byState[s],livePrice?.price);
       out[s]=m;
       const val = metric==="tons"?m.totalTons : metric==="usd"?m.totalUSD : m.pct;
       if(metric==="pct"){ pmin=Math.min(pmin,val); pmax=Math.max(pmax,val); }
       else max=Math.max(max,val);
     });
     return { out, max, pmin:pmin===Infinity?0:pmin, pmax };
-  }, [crop, metric, wx, acresInfo]);
+  }, [crop, metric, wx, acresInfo, livePrice]);
 
   function valueOf(s){const m=data.out[s]; if(!m||!m.acres) return null;
     return metric==="tons"?m.totalTons:metric==="usd"?m.totalUSD:m.pct;}

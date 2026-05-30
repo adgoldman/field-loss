@@ -105,27 +105,32 @@ export default function FieldLossEstimator() {
     return () => { cancelled = true; };
   }, [stateCode]);
 
-  // NASS acres — auto-pulled from the proxy (same-origin) on load and whenever
-  // the crop or state changes. The proxy keeps the key server-side and falls
-  // back to AREA HARVESTED for crops with no AREA PLANTED series (e.g. apples).
+  // Live model inputs from USDA NASS (same-origin proxy): acreage + yield for the
+  // selected state, and national farm-gate price. All remain editable overrides.
   const [nassMsg, setNassMsg] = useState("");
   useEffect(() => {
     let cancelled = false;
-    setNassMsg("Loading live acres…");
-    fetch(`/api/nass/planted-acres?crop=${CROPS[cropKey].nass}&state=${stateCode}`)
-      .then((r) => (r.ok ? r.json() : Promise.reject(new Error(`proxy ${r.status}`))))
-      .then((d) => {
-        if (cancelled) return;
-        if (d.acres > 0) {
-          setAcres(d.acres);
-          setAcresSource("nass");
-          const stat = d.stat === "AREA HARVESTED" ? "harvested" : "planted";
-          setNassMsg(`Live: ${d.year} ${stat} acres from USDA NASS.`);
-        } else {
-          setNassMsg("No NASS acreage for this crop/state — using your value.");
-        }
-      })
-      .catch(() => { if (!cancelled) setNassMsg("Live pull unavailable (is the proxy running?) — using your value."); });
+    const c = CROPS[cropKey];
+    setNassMsg("Loading live data…");
+    Promise.all([
+      fetch(`/api/nass/state-acres?crop=${c.nass}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+      fetch(`/api/price?crop=${c.nass}`).then((r) => (r.ok ? r.json() : null)).catch(() => null),
+    ]).then(([sa, pr]) => {
+      if (cancelled) return;
+      const parts = [];
+      const row = sa && (sa.states || []).find((s) => s.state === stateCode);
+      // acreage: planted preferred, harvested fallback (tree crops report harvested)
+      const ac = row ? (Number(row.planted) || Number(row.harvested) || 0) : 0;
+      if (ac > 0) { setAcres(ac); setAcresSource("nass"); parts.push(`${row.year} ${row.planted ? "planted" : "harvested"} acres`); }
+      // yield — only when the NASS unit matches the crop's display unit (e.g. CWT)
+      const unitOk = row && String(row.yieldUnit || "").toUpperCase().includes(c.unit.toUpperCase());
+      if (row && Number(row.yield) > 0 && unitOk) { setA((a) => ({ ...a, yield: Number(row.yield) })); parts.push(`yield ${fmt(Number(row.yield))}`); }
+      else setA((a) => ({ ...a, yield: c.yield }));
+      // national farm-gate price ($/cwt)
+      if (pr && pr.price > 0) { setA((a) => ({ ...a, price: pr.price })); parts.push(`price $${pr.price}/cwt (${pr.year})`); }
+      else setA((a) => ({ ...a, price: c.price }));
+      setNassMsg(parts.length ? `Live from USDA NASS: ${parts.join(" · ")}. Editable below.` : "No live data for this crop/state — using defaults.");
+    });
     return () => { cancelled = true; };
   }, [cropKey, stateCode]);
 
@@ -266,10 +271,11 @@ export default function FieldLossEstimator() {
 
         {/* NASS */}
         <div className="card" style={{ padding: "18px 18px", marginBottom: 18 }}>
-          <SectionTitle>USDA NASS Quick Stats (live acreage)</SectionTitle>
+          <SectionTitle>USDA NASS Quick Stats (live inputs)</SectionTitle>
           <p style={{ fontSize: 12.5, color: C.sub, margin: 0, lineHeight: 1.6 }}>
-            Planted acres load automatically for the selected crop and state via the
-            data service — no key needed. Edit the acreage above to override.
+            Acreage, yield, and farm-gate price load automatically for the selected
+            crop and state via the data service — no key needed. Any value above can
+            be edited to override the live figure.
           </p>
           {nassMsg && <p style={{ fontSize: 12, color: acresSource === "nass" ? C.field : C.gold, margin: "10px 0 0" }} className="mono">{nassMsg}</p>}
         </div>
