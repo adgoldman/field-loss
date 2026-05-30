@@ -652,4 +652,28 @@ app.get(/^(?!\/api\/).*/, (req, res) => {
   });
 });
 
-app.listen(PORT, () => console.log(`Field Loss server on http://localhost:${PORT}`));
+// ---- Cache warm-up ----
+// The rescue endpoint makes ~5 live USDA calls, so the FIRST request after a
+// cold start (e.g. Render free-tier spin-up) is slow enough to look like a
+// failure. On boot we pre-fetch the default-horizon rescue query for each
+// fresh-produce crop against our own route, so the 6h cache is already warm
+// when the first visitor arrives. Best-effort: failures here never block boot.
+// Disable with WARM_CACHE=0.
+const WARM_CROPS = ["TOMATOES", "LETTUCE", "STRAWBERRIES", "POTATOES", "APPLES", "ORANGES", "LEMONS"];
+async function warmCache(port) {
+  if (process.env.WARM_CACHE === "0" || !NASS_KEY) return;
+  for (const crop of WARM_CROPS) {
+    try {
+      const r = await fetch(`http://127.0.0.1:${port}/api/forecast/rescue?crop=${crop}&horizon=30`);
+      console.log(`  warm ${crop} -> ${r.status}`);
+    } catch (e) {
+      console.log(`  warm ${crop} failed: ${String(e)}`);
+    }
+  }
+  console.log("Cache warm-up complete.");
+}
+
+app.listen(PORT, () => {
+  console.log(`Field Loss server on http://localhost:${PORT}`);
+  warmCache(PORT); // fire-and-forget; does not block serving
+});
