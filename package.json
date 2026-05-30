@@ -1,0 +1,27 @@
+{
+  "name": "field-loss",
+  "version": "0.1.0",
+  "description": "On-farm food loss estimator — React app + USDA data proxy",
+  "type": "commonjs",
+  "scripts": {
+    "proxy": "node --env-file=.env server.js",
+    "start": "node server.js",
+    "dev": "vite",
+    "dev:all": "concurrently -n proxy,web -c green,cyan \"npm:proxy\" \"npm:dev\"",
+    "build": "vite build",
+    "preview": "vite preview"
+  },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "d3": "^7.9.0",
+    "express": "^4.19.2",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "recharts": "^2.12.7"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-react": "^4.3.1",
+    "concurrently": "^9.0.1",
+    "vite": "^5.4.0"
+  }
+}

@@ -1,0 +1,14 @@
+services:
+  - type: web
+    name: field-loss
+    runtime: node
+    plan: free
+    buildCommand: npm install && npm run build
+    startCommand: node server.js
+    envVars:
+      # Render injects PORT automatically; server.js reads process.env.PORT.
+      - key: NODE_VERSION
+        value: "20"
+      # Set this in the Render dashboard (Environment → Secret). Do NOT commit it.
+      - key: NASS_KEY
+        sync: false
