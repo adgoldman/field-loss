@@ -53,15 +53,21 @@ export default function FieldLossForecast({ importShock = 0, setImportShock }) {
   const [data, setData] = useState({ status: "idle", states: [] });
   const [imp, setImp] = useState(null); // import exposure (share + flex + live FAS) for this crop
 
+  // yoyBaseline anchors the server price model to the prior-year import level, so the
+  // live price (which embeds today's imports) is not double-counted: at importShock =
+  // this YoY change the price factor is ×1.00 and only the swing away from it adds
+  // import-driven rescue. Only use the baseline once imp matches the selected crop.
+  const yoyBaseline = (imp?.crop === CROPS[crop].nass ? imp?.live?.yoyPct : 0) ?? 0;
+
   useEffect(() => {
     let cancelled = false;
     setData(d => ({ ...d, status: "loading" }));
-    fetch(`${DEFAULT_PROXY}/api/forecast/rescue?crop=${CROPS[crop].nass}&horizon=${horizon}&importShock=${importShock}`)
+    fetch(`${DEFAULT_PROXY}/api/forecast/rescue?crop=${CROPS[crop].nass}&horizon=${horizon}&importShock=${importShock}&yoyBaseline=${yoyBaseline}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`proxy ${r.status}`)))
       .then(d => { if (!cancelled) setData({ status: "ok", ...d }); })
       .catch(e => { if (!cancelled) setData({ status: "error", error: String(e), states: [] }); });
     return () => { cancelled = true; };
-  }, [crop, horizon, importShock]);
+  }, [crop, horizon, importShock, yoyBaseline]);
 
   // import exposure for this crop → drives the shared import-shock lever readouts
   useEffect(() => {
@@ -72,6 +78,18 @@ export default function FieldLossForecast({ importShock = 0, setImportShock }) {
       .then(d => { if (!cancelled) setImp(d); });
     return () => { cancelled = true; };
   }, [crop]);
+
+  // auto-set the shared lever to the live YoY import change on FAS load (once per
+  // crop), so the forecast opens on the real current market. Guard on imp.crop
+  // because the fetch is async and imp can briefly hold the previous crop's payload.
+  const [autoSetCrop, setAutoSetCrop] = useState(null);
+  useEffect(() => {
+    const yoy = imp?.live?.yoyPct;
+    if (yoy == null || !setImportShock || imp?.crop !== CROPS[crop].nass) return;
+    if (autoSetCrop === crop) return;
+    setImportShock(Math.max(-1, Math.min(1, yoy)));
+    setAutoSetCrop(crop);
+  }, [imp, crop, setImportShock, autoSetCrop]);
 
   const rows = useMemo(() => {
     const lbs = CROPS[crop].lbs;
@@ -96,6 +114,10 @@ export default function FieldLossForecast({ importShock = 0, setImportShock }) {
   // citrus has no measured rescue channels; its in-field figure is an economic
   // at-risk estimate (volume × on-tree-abandonment risk) and "unsold" is n/a.
   const isCitrus = data.cropKind === "citrus";
+  // import-driven rescue only appears when the lever is pushed *past* the live YoY
+  // anchor (a surge beyond today's market crashes price further); at or below the
+  // anchor it's 0, so key the extra column off real volume rather than shock !== 0.
+  const showImport = !isCitrus && totalImport > 0;
 
   return (
     <div style={{ padding: 16, fontFamily: "'Archivo', system-ui, sans-serif", color: C.ink }}>
@@ -165,7 +187,7 @@ export default function FieldLossForecast({ importShock = 0, setImportShock }) {
             <Stat label="Pending to market" value={`${fmt(totalPending, 0)} tons`} color={C.field} />
             <Stat label="Harvested · unsold" value={isCitrus ? "n/a" : `${fmt(totalUnsold, 0)} tons`} color={C.clay} />
             <Stat label={isCitrus ? "On-tree at-risk (econ)" : "Unharvested · in field"} value={data.inFieldAvailable === false ? "n/a" : `${fmt(totalInField, 0)} tons`} color={C.soil} />
-            {!isCitrus && importShock !== 0 && (
+            {showImport && (
               <Stat label="Import-driven rescue" value={`${fmt(totalImport, 0)} tons`} color={C.clay} />
             )}
             <Stat label="States in window" value={String(rows.length)} />
@@ -178,7 +200,7 @@ export default function FieldLossForecast({ importShock = 0, setImportShock }) {
                   <Th>#</Th><Th>State</Th><Th>Yr</Th><Th right>Harvest in window</Th>
                   <Th right>Volume entering ({unit})</Th><Th right>{isCitrus ? "On-tree abandon risk" : "Condition risk"}</Th>
                   <Th right>Pending to market</Th><Th right>Harvested · unsold</Th><Th right>{isCitrus ? "On-tree at-risk" : "Unharvested · in field"}</Th>
-                  {!isCitrus && importShock !== 0 && <Th right>Import-driven</Th>}
+                  {showImport && <Th right>Import-driven</Th>}
                 </tr>
               </thead>
               <tbody>
@@ -202,7 +224,7 @@ export default function FieldLossForecast({ importShock = 0, setImportShock }) {
                     <Td right mono style={{ color: r.pendingTons > 0 ? C.field : C.sub }}>{r.pendingTons > 0 ? `${fmt(r.pendingTons, 0)} t` : "—"}</Td>
                     <Td right mono style={{ color: r.unsoldTons > 0 ? C.clay : C.sub }}>{isCitrus ? "n/a" : (r.unsoldTons > 0 ? `${fmt(r.unsoldTons, 0)} t` : "—")}</Td>
                     <Td right mono style={{ color: r.inFieldTons > 0 ? C.soil : C.sub }}>{r.inFieldTons > 0 ? `${fmt(r.inFieldTons, 0)} t` : "—"}</Td>
-                    {!isCitrus && importShock !== 0 && (
+                    {showImport && (
                       <Td right mono style={{ color: r.importTons > 0 ? C.clay : C.sub }}>{r.importTons > 0 ? `${fmt(r.importTons, 0)} t` : "—"}</Td>
                     )}
                   </tr>
@@ -246,12 +268,14 @@ function ImportShockBar({ imp, data, importShock, setImportShock, importTons, is
   const flex = imp?.priceFlex ?? null;
   const factor = data?.priceFactor != null ? data.priceFactor : 1;
   const live = imp?.live;
+  const yoy = live?.yoyPct;
+  const atAnchor = yoy != null && Math.abs(importShock - yoy) < 0.005;
   return (
     <div style={{ border: `1px solid ${C.line}`, background: C.panel, borderRadius: 10, padding: "12px 14px", margin: "0 0 12px", maxWidth: 760 }}>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
         <div style={{ fontSize: 11, color: C.sub, textTransform: "uppercase", letterSpacing: 1, fontFamily: "'IBM Plex Mono', monospace" }}>Import shock → recovery-market swing</div>
         <div style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: importShock === 0 ? C.sub : (importShock > 0 ? C.clay : C.field) }}>
-          {pct > 0 ? `+${pct}` : pct}% fresh imports {importShock === 0 ? "· status quo" : ""}
+          {pct > 0 ? `+${pct}` : pct}% fresh imports {atAnchor ? "· live YoY (today's market)" : (importShock === 0 ? "· status quo" : "")}
         </div>
       </div>
       <input type="range" min={-100} max={100} step={5} value={pct}
@@ -271,13 +295,15 @@ function ImportShockBar({ imp, data, importShock, setImportShock, importTons, is
             <Mini label="Import share" v={share != null ? `${fmt(share * 100, 0)}%` : "—"} />
             <Mini label="Price flexibility" v={flex != null ? fmt(flex, 1) : "—"} />
             <Mini label="Price factor" v={`×${fmt(factor, 2)}`} color={factor < 1 ? C.clay : (factor > 1 ? C.field : C.ink)} />
-            <Mini label="Import-driven rescue" v={importShock !== 0 ? `${fmt(importTons, 0)} t` : "—"} color={C.clay} />
+            <Mini label="Import-driven rescue" v={importTons > 0 ? `${fmt(importTons, 0)} t` : "—"} color={C.clay} />
           </div>
           <div style={{ fontSize: 11, color: C.sub, marginTop: 8, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace" }}>
             {live
               ? `FAS live: ${fmt(live.volCwt / 1000)}k cwt in ${live.period}${live.yoyPct != null ? ` (${live.yoyPct > 0 ? "+" : ""}${fmt(live.yoyPct * 100, 1)}% YoY)` : ""} · ${live.source}`
               : (imp?.note || "structural import share (live FAS volume unavailable)")}
-            . Live price already embeds today's imports — move the lever to simulate a change.
+            {yoy != null
+              ? `. Lever auto-set to the live ${yoy > 0 ? "+" : ""}${fmt(yoy * 100, 1)}% YoY change and anchored there at ×1.00 (today's market) — push past it to add import-driven rescue.`
+              : ". Live price already embeds today's imports — move the lever to simulate a change."}
           </div>
         </>
       )}

@@ -257,7 +257,24 @@ export default function FieldLossCounty({ init, importShock = 0, setImportShock 
       .then(d=>{ if(!cancelled) setImp(d); });
     return ()=>{cancelled=true;};
   }, [crop, proxy]);
-  const importFactor = clamp(1 - (imp?.priceFlex ?? 2.0) * importShock * (imp?.importShare ?? 0), 0.25, 2.5);
+  // anchored ratio form: pf(x)=1−flex·x·share; factor = pf(shock)/pf(yoyAnchor), so
+  // at shock = live YoY change the factor is ×1.00 (today's real market) and only the
+  // swing away from it moves price. yoyAnchor=0 → status-quo anchor.
+  const importYoy = imp?.live?.yoyPct ?? 0;
+  const pfCounty = (x) => clamp(1 - (imp?.priceFlex ?? 2.0) * x * (imp?.importShare ?? 0), 0.25, 2.5);
+  const importFactor = clamp(pfCounty(importShock) / pfCounty(importYoy), 0.25, 2.5);
+
+  // auto-set the shared lever to the live YoY import change on FAS load (once per
+  // crop). Guard on imp.crop because the fetch is async and imp can briefly hold the
+  // previous crop's payload.
+  const [autoSetCrop, setAutoSetCrop] = useState(null);
+  useEffect(()=>{
+    const yoy = imp?.live?.yoyPct;
+    if (yoy == null || !setImportShock || imp?.crop !== CROPS[crop].nass) return;
+    if (autoSetCrop === crop) return;
+    setImportShock(clamp(yoy, -1, 1));
+    setAutoSetCrop(crop);
+  }, [imp, crop, setImportShock, autoSetCrop]);
 
   // model per county
   const data = useMemo(()=>{
@@ -411,12 +428,14 @@ function ImportShockBar({ imp, importShock, setImportShock, importFactor }){
   const share=imp?.importShare ?? null;
   const flex=imp?.priceFlex ?? null;
   const live=imp?.live;
+  const yoy=live?.yoyPct;
+  const atAnchor = yoy != null && Math.abs(importShock - yoy) < 0.005;
   return (
     <div className="card" style={{padding:"14px 16px",marginBottom:16}}>
       <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,flexWrap:"wrap"}}>
         <div className="mono" style={{fontSize:10.5,color:C.sub,textTransform:"uppercase",letterSpacing:1}}>Import shock → recovery-market swing</div>
         <div className="mono" style={{fontSize:11,color: importShock===0?C.sub:(importShock>0?C.clay:C.field)}}>
-          {pct>0?`+${pct}`:pct}% fresh imports {importShock===0?"· status quo":""}
+          {pct>0?`+${pct}`:pct}% fresh imports {atAnchor?"· live YoY (today's market)":(importShock===0?"· status quo":"")}
         </div>
       </div>
       <input type="range" min={-100} max={100} step={5} value={pct}
@@ -435,7 +454,9 @@ function ImportShockBar({ imp, importShock, setImportShock, importFactor }){
         {live
           ? `FAS live: ${fmt(live.volCwt/1000)}k cwt in ${live.period}${live.yoyPct!=null?` (${live.yoyPct>0?"+":""}${fmt(live.yoyPct*100,1)}% YoY)`:""} · ${live.source}`
           : (imp?.note || "structural import share (live FAS volume unavailable)")}
-        . Live price already embeds today's imports — move the lever to simulate a change.
+        {yoy != null
+          ? `. Lever auto-set to the live ${yoy>0?"+":""}${fmt(yoy*100,1)}% YoY change and anchored there at ×1.00 (today's market) — drag to simulate other scenarios.`
+          : ". Live price already embeds today's imports — move the lever to simulate a change."}
       </div>
     </div>
   );

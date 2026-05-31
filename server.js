@@ -680,10 +680,15 @@ app.get("/api/forecast/rescue", async (req, res) => {
   // quo (live price already embeds today's imports). A surge crashes price and
   // pushes extra volume into the rescue market; see importPriceFactor / uplift below.
   const importShock = Math.max(-1, Math.min(1, Number(req.query.importShock) || 0));
+  // yoyBaseline anchors the price model to the prior-year import level so the live
+  // price (which already embeds today's imports) is not double-counted. With the
+  // lever auto-set to the observed YoY change, priceFactor reproduces today's market
+  // (×1.00) at that point and only the *delta* from it moves the rescue volume.
+  const yoyBaseline = Math.max(-1, Math.min(1, Number(req.query.yoyBaseline) || 0));
   if (!NASS_KEY) return res.status(500).json({ error: "NASS_KEY not configured" });
   if (!crop) return res.status(400).json({ error: "crop required" });
 
-  const ck = `fcast:${crop}:${horizon}:imp${importShock.toFixed(2)}`;
+  const ck = `fcast:${crop}:${horizon}:imp${importShock.toFixed(2)}:yoy${yoyBaseline.toFixed(2)}`;
   const cached = getCached(ck);
   if (cached) return res.json({ ...cached, cached: true });
 
@@ -779,7 +784,7 @@ app.get("/api/forecast/rescue", async (req, res) => {
     // < 1 means an import surge has crashed price; the fractional drop drives an
     // economic-abandonment uplift applied to in-window volume (national effect, so
     // computed once and applied per state). At importShock 0 this is a no-op.
-    const priceFactor = importPriceFactor(crop, importShock);
+    const priceFactor = Math.max(0.25, Math.min(2.5, importPriceFactor(crop, importShock) / importPriceFactor(crop, yoyBaseline)));
     const importEconRate = Math.max(0, Math.min(IMPORT_ABANDON_CAP, IMPORT_ABANDON_SENS * Math.max(0, 1 - priceFactor)));
 
     const states = [];
@@ -854,7 +859,7 @@ app.get("/api/forecast/rescue", async (req, res) => {
       windowSource: isCitrus ? "citrus-season" : (usedCalendar ? "static-calendar" : "live-progress"),
       cropKind,
       // import-shock scenario echo: what was simulated and its modeled effect.
-      importShock, importShare: IMPORT_SHARE[crop] ?? null, priceFactor: +priceFactor.toFixed(3),
+      importShock, yoyBaseline, importShare: IMPORT_SHARE[crop] ?? null, priceFactor: +priceFactor.toFixed(3),
       importEconRate: +importEconRate.toFixed(3),
       // citrus: in-field channel IS available, but as an ECONOMIC estimate (volume x
       // on-tree abandonment risk), not a measured acreage gap.

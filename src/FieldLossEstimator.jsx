@@ -95,12 +95,31 @@ export default function FieldLossEstimator({ importShock = 0, setImportShock }) 
       .then((d) => { if (!cancelled) setImp(d); });
     return () => { cancelled = true; };
   }, [cropKey]);
-  // import shock → price displacement. shock 0 leaves price unchanged (live price
-  // already embeds today's imports). priceFactor = 1 − flex × shock × importShare.
+  // import shock → price displacement, anchored to the live year-over-year change.
+  // pf(x) = 1 − flex × x × importShare; the effective price is the ratio
+  // pf(shock)/pf(yoyAnchor), so at shock = the observed YoY change the factor is
+  // ×1.00 (reproduces today's real market — no double-count) and only the swing
+  // away from it moves the price. yoyAnchor = 0 falls back to a status-quo anchor.
   const importShare = imp?.importShare ?? 0;
   const priceFlex = imp?.priceFlex ?? 2.0;
-  const priceFactor = clamp(1 - priceFlex * importShock * importShare, 0.25, 2.5);
+  const yoyAnchor = imp?.live?.yoyPct ?? 0;
+  const pf = (x) => clamp(1 - priceFlex * x * importShare, 0.25, 2.5);
+  const priceFactor = clamp(pf(importShock) / pf(yoyAnchor), 0.25, 2.5);
   const effPrice = a.price * priceFactor;
+
+  // auto-set the shared lever to the observed YoY import change when live FAS data
+  // arrives, so every tab opens on the real current market. Only fires once per crop
+  // load (when the lever is still at status quo) to avoid stomping a user's drag.
+  const [autoSetCrop, setAutoSetCrop] = useState(null);
+  useEffect(() => {
+    const yoy = imp?.live?.yoyPct;
+    // only act on FAS data that matches the selected crop (the fetch is async, so
+    // imp can briefly hold the previous crop's payload)
+    if (yoy == null || !setImportShock || imp?.crop !== CROPS[cropKey].nass) return;
+    if (autoSetCrop === cropKey) return;
+    setImportShock(clamp(yoy, -1, 1));
+    setAutoSetCrop(cropKey);
+  }, [imp, cropKey, setImportShock, autoSetCrop]);
 
   // weather (live)
   const [wx, setWx] = useState({ status: "idle", index: 0, heavy: 0, frost: 0, heat: 0, days: 0 });
@@ -322,7 +341,9 @@ export default function FieldLossEstimator({ importShock = 0, setImportShock }) 
               : imp
                 ? `Import share is a curated USDA-ERS structural estimate${imp?.note?.includes("FAS_KEY") ? " (set FAS_KEY for live FAS volume/trend)" : ""}.`
                 : "Loading import exposure…"}
-            {" "}Lever defaults to status quo, since the live price already embeds today’s imports.
+            {" "}{imp?.live?.yoyPct != null
+              ? `Lever auto-sets to the live ${imp.live.yoyPct > 0 ? "+" : ""}${fmt(imp.live.yoyPct * 100, 1)}% YoY change and is anchored there at ×1.00, so it reproduces today’s market without double-counting; drag to explore other scenarios.`
+              : "Lever defaults to status quo, since the live price already embeds today’s imports."}
           </p>
         </div>
 
