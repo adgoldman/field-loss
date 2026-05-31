@@ -71,7 +71,7 @@ const usd = (n) =>
 
 function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 
-export default function FieldLossEstimator() {
+export default function FieldLossEstimator({ importShock = 0, setImportShock }) {
   const [cropKey, setCropKey] = useState("tomatoes");
   const [stateCode, setStateCode] = useState("CA");
   const [acres, setAcres] = useState(20000);
@@ -84,6 +84,23 @@ export default function FieldLossEstimator() {
     return { yield: c.yield, price: c.price, harvestCost: c.harvestCost, baseLoss: c.baseLoss, perish: c.perish };
   }
   useEffect(() => { setA(seed(CROPS[cropKey])); }, [cropKey]);
+
+  // imports: structural share + price flexibility (drives the import-shock swing),
+  // plus live FAS volume/trend as context. Falls back to nulls without a key.
+  const [imp, setImp] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    fetch(`/api/imports?crop=${CROPS[cropKey].nass}`)
+      .then((r) => (r.ok ? r.json() : null)).catch(() => null)
+      .then((d) => { if (!cancelled) setImp(d); });
+    return () => { cancelled = true; };
+  }, [cropKey]);
+  // import shock → price displacement. shock 0 leaves price unchanged (live price
+  // already embeds today's imports). priceFactor = 1 − flex × shock × importShare.
+  const importShare = imp?.importShare ?? 0;
+  const priceFlex = imp?.priceFlex ?? 2.0;
+  const priceFactor = clamp(1 - priceFlex * importShock * importShare, 0.25, 2.5);
+  const effPrice = a.price * priceFactor;
 
   // weather (live)
   const [wx, setWx] = useState({ status: "idle", index: 0, heavy: 0, frost: 0, heat: 0, days: 0 });
@@ -152,7 +169,8 @@ export default function FieldLossEstimator() {
   // ---- the model ----
   const m = useMemo(() => {
     const gross = acres * a.yield;                      // crop units
-    const marginRatio = a.price > 0 ? (a.price - a.harvestCost) / a.price : -1;
+    // economics run on the import-adjusted price (effPrice); at shock 0 effPrice = a.price
+    const marginRatio = effPrice > 0 ? (effPrice - a.harvestCost) / effPrice : -1;
     // economic abandonment: logistic on margin ratio
     const fAband = clamp(0.015 + 0.60 / (1 + Math.exp(14 * (marginRatio - 0.18))), 0, 0.65);
     const abandonedVol = gross * fAband;
@@ -171,11 +189,11 @@ export default function FieldLossEstimator() {
         { key: "Lost during harvest",   vol: harvestLossVol, tons: toTons(harvestLossVol), color: C.gold },
         { key: "Weather / spoilage",   vol: weatherLossVol, tons: toTons(weatherLossVol), color: C.teal },
       ],
-      totalVol, totalTons: toTons(totalVol), totalUSD: totalVol * a.price,
+      totalVol, totalTons: toTons(totalVol), totalUSD: totalVol * effPrice,
       marketedTons: toTons(marketedVol), marketedPct: gross > 0 ? marketedVol / gross : 0,
       pct: gross > 0 ? totalVol / gross : 0,
     };
-  }, [acres, a, wx, cropKey]);
+  }, [acres, a, wx, cropKey, effPrice]);
 
   const upd = (k) => (e) => setA({ ...a, [k]: Number(e.target.value) });
   const unit = CROPS[cropKey].unit;
@@ -265,6 +283,47 @@ export default function FieldLossEstimator() {
               </>
             )}
           </div>
+        </div>
+
+        {/* import shock */}
+        <div className="card" style={{ padding: "18px 18px", marginBottom: 16 }}>
+          <SectionTitle>Import shock → recovery-market swing</SectionTitle>
+          <p style={{ fontSize: 12, color: C.sub, margin: "0 0 12px" }}>
+            Fresh imports add to US supply. Demand is inelastic, so an import surge crashes the farm-gate
+            price, collapses grower margins, and pushes more crop into the rescue / waste market. The size of
+            the swing scales with this crop’s import exposure.
+          </p>
+          <div style={{ display: "grid", gridTemplateColumns: "1.4fr 1fr", gap: 18, alignItems: "center" }}>
+            <div>
+              <div className="mono" style={{ fontSize: 12, color: C.sub, display: "flex", justifyContent: "space-between" }}>
+                <span>Simulated import change</span>
+                <span style={{ color: importShock === 0 ? C.sub : (importShock > 0 ? C.clay : C.field), fontWeight: 600 }}>
+                  {importShock > 0 ? "+" : ""}{fmt(importShock * 100)}%
+                </span>
+              </div>
+              <input type="range" min={-100} max={100} step={5} value={Math.round(importShock * 100)}
+                onChange={(e) => setImportShock && setImportShock(Number(e.target.value) / 100)}
+                style={{ width: "100%", margin: "8px 0 4px", accentColor: C.field }} />
+              <div className="mono" style={{ fontSize: 10, color: C.sub, display: "flex", justifyContent: "space-between" }}>
+                <span>−100% (imports vanish)</span><span>status quo</span><span>+100% (imports double)</span>
+              </div>
+            </div>
+            <div className="mono" style={{ fontSize: 12, color: C.ink, lineHeight: 1.7 }}>
+              <div>Import share of US supply: <b>{importShare > 0 ? fmt(importShare * 100) + "%" : "—"}</b></div>
+              <div>Price flexibility: <b>{imp ? priceFlex : "—"}</b></div>
+              <div>Price factor: <b style={{ color: priceFactor < 1 ? C.clay : priceFactor > 1 ? C.field : C.ink }}>×{fmt(priceFactor, 2)}</b></div>
+              <div>Effective price: <b>${fmt(effPrice, 2)}</b><span style={{ color: C.sub }}> (base ${fmt(a.price, 2)})</span></div>
+              <div>Economic abandonment: <b style={{ color: C.soil }}>{fmt(m.fAband * 100, 1)}%</b></div>
+            </div>
+          </div>
+          <p style={{ fontSize: 11, color: C.sub, margin: "12px 0 0" }} className="mono">
+            {imp?.live?.volCwt
+              ? `Live FAS imports: ${fmt(imp.live.volCwt / 1000)}k CWT in ${imp.live.period}${imp.live.yoyPct != null ? ` · ${imp.live.yoyPct > 0 ? "+" : ""}${fmt(imp.live.yoyPct * 100, 1)}% YoY` : ""} (${imp.live.source}).`
+              : imp
+                ? `Import share is a curated USDA-ERS structural estimate${imp?.note?.includes("FAS_KEY") ? " (set FAS_KEY for live FAS volume/trend)" : ""}.`
+                : "Loading import exposure…"}
+            {" "}Lever defaults to status quo, since the live price already embeds today’s imports.
+          </p>
         </div>
 
         {/* assumptions */}

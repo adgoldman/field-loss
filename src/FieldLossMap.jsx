@@ -83,9 +83,10 @@ const NO_LIVE_FRESH_YIELD = new Set(["TOMATOES"]);
 // Abandonment is MEASURED from the planted−harvested gap when both exist (same year);
 // otherwise it falls back to the economic (margin) model. Production uses real NASS
 // yield when its unit matches the crop, else the assumed coefficient.
-function modelState(crop, area, wx, priceOverride) {
+function modelState(crop, area, wx, priceOverride, importFactor = 1) {
   const c = CROPS[crop];
-  const price = Number(priceOverride) > 0 ? Number(priceOverride) : c.price; // live NASS farm-gate price, else default
+  const basePrice = Number(priceOverride) > 0 ? Number(priceOverride) : c.price; // live NASS farm-gate price, else default
+  const price = basePrice * importFactor; // import-shock displacement (×1 at status quo)
   const planted = Number(area?.planted) || 0;
   const harvestedRaw = Number(area?.harvested) || 0;
   const yUnit = String(area?.yieldUnit || "").toUpperCase();
@@ -132,12 +133,13 @@ function modelState(crop, area, wx, priceOverride) {
     totalTons: tons(totalVol), totalUSD: totalVol*price, pct: gross>0?totalVol/gross:0 };
 }
 
-export default function FieldLossMap({ onDrill }) {
+export default function FieldLossMap({ onDrill, importShock = 0, setImportShock }) {
   const [crop, setCrop] = useState("tomatoes");
   const [metric, setMetric] = useState("tons"); // tons | usd | pct
   const [wx, setWx] = useState({ status:"loading", byState:{} });
   const [sel, setSel] = useState(null);
   const [livePrice, setLivePrice] = useState(null); // NASS farm-gate $/cwt, national
+  const [imp, setImp] = useState(null); // import exposure (share + flex) for this crop
   // per-state area: live NASS {planted,harvested,yield} via proxy, SHARES as fallback
   const [acresInfo, setAcresInfo] = useState(() => {
     const byState = {};
@@ -180,6 +182,17 @@ export default function FieldLossMap({ onDrill }) {
     return () => { cancelled = true; };
   }, [crop]);
 
+  // import exposure for this crop → import-shock price displacement (shared lever)
+  useEffect(() => {
+    let cancelled = false;
+    setImp(null);
+    fetch(`${DEFAULT_PROXY}/api/imports?crop=${CROPS[crop].nass}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(d => { if (!cancelled) setImp(d); });
+    return () => { cancelled = true; };
+  }, [crop]);
+  const importFactor = clamp(1 - (imp?.priceFlex ?? 2.0) * importShock * (imp?.importShare ?? 0), 0.25, 2.5);
+
   // one batched weather call for all states
   useEffect(() => {
     const order = Object.keys(STATES);
@@ -216,14 +229,14 @@ export default function FieldLossMap({ onDrill }) {
       const area=acresInfo.byState[s];
       const acres=area?(Number(area.planted)||Number(area.harvested)||0):0;
       if(acres<=0){ out[s]={acres:0}; return; }
-      const m=modelState(crop,area,wx.byState[s],livePrice?.price);
+      const m=modelState(crop,area,wx.byState[s],livePrice?.price,importFactor);
       out[s]=m;
       const val = metric==="tons"?m.totalTons : metric==="usd"?m.totalUSD : m.pct;
       if(metric==="pct"){ pmin=Math.min(pmin,val); pmax=Math.max(pmax,val); }
       else max=Math.max(max,val);
     });
     return { out, max, pmin:pmin===Infinity?0:pmin, pmax };
-  }, [crop, metric, wx, acresInfo, livePrice]);
+  }, [crop, metric, wx, acresInfo, livePrice, importFactor]);
 
   function valueOf(s){const m=data.out[s]; if(!m||!m.acres) return null;
     return metric==="tons"?m.totalTons:metric==="usd"?m.totalUSD:m.pct;}
@@ -288,6 +301,9 @@ export default function FieldLossMap({ onDrill }) {
             <div style={{color: acresInfo.status==="ok"?C.field:C.gold}}>acres: {acresInfo.source}</div>
           </div>
         </div>
+
+        {/* shared import-shock lever */}
+        <ImportShockBar crop={crop} imp={imp} importShock={importShock} setImportShock={setImportShock} importFactor={importFactor} />
 
         <div style={{display:"grid",gridTemplateColumns:"1.35fr 1fr",gap:16}}>
           {/* map */}
@@ -383,6 +399,46 @@ export default function FieldLossMap({ onDrill }) {
 function sqrtNorm(v,data,metric){ if(v==null) return 0;
   if(metric==="pct") return data.pmax>data.pmin?(v-data.pmin)/(data.pmax-data.pmin):0.5;
   return data.max>0?Math.sqrt(v/data.max):0; }
+
+// Shared import-shock lever (same model + state used by every tab). Moving it here
+// flows through importFactor → state price → economic abandonment → loss totals.
+function ImportShockBar({ crop, imp, importShock, setImportShock, importFactor }){
+  const pct = Math.round((importShock||0)*100);
+  const share = imp?.importShare ?? null;
+  const flex = imp?.priceFlex ?? null;
+  const live = imp?.live;
+  return (
+    <div className="card" style={{padding:"14px 16px",marginBottom:16}}>
+      <div style={{display:"flex",justifyContent:"space-between",alignItems:"baseline",gap:10,flexWrap:"wrap"}}>
+        <div className="mono" style={{fontSize:10.5,color:C.sub,textTransform:"uppercase",letterSpacing:1}}>Import shock → recovery-market swing</div>
+        <div className="mono" style={{fontSize:11,color: importShock===0?C.sub:(importShock>0?C.clay:C.field)}}>
+          {pct>0?`+${pct}`:pct}% fresh imports {importShock===0?"· status quo":""}
+        </div>
+      </div>
+      <input type="range" min={-100} max={100} step={5} value={pct}
+        onChange={e=>setImportShock && setImportShock(Number(e.target.value)/100)}
+        style={{width:"100%",margin:"10px 0 4px",accentColor:C.clay}}/>
+      <div style={{display:"flex",justifyContent:"space-between"}}>
+        <span className="mono" style={{fontSize:10,color:C.sub}}>−100% (import collapse)</span>
+        <span className="mono" style={{fontSize:10,color:C.sub}}>+100% (import surge)</span>
+      </div>
+      <div style={{display:"flex",gap:18,flexWrap:"wrap",marginTop:10}}>
+        <Mini label="Import share" v={share!=null?fmt(share*100,0)+"%":"—"}/>
+        <Mini label="Price flexibility" v={flex!=null?fmt(flex,1):"—"}/>
+        <Mini label="Price factor" v={"×"+fmt(importFactor,2)} color={importFactor<1?C.clay:(importFactor>1?C.field:C.ink)}/>
+      </div>
+      <div className="mono" style={{fontSize:10.5,color:C.sub,marginTop:8,lineHeight:1.5}}>
+        {live
+          ? `FAS live: ${fmt(live.volCwt/1000)}k cwt in ${live.period}${live.yoyPct!=null?` (${live.yoyPct>0?"+":""}${fmt(live.yoyPct*100,1)}% YoY)`:""} · ${live.source}`
+          : (imp?.note || "structural import share (live FAS volume unavailable)")}
+        . Live price already embeds today's imports — move the lever to simulate a change.
+      </div>
+    </div>
+  );
+}
+function Mini({label,v,color}){return(
+  <div><div className="mono" style={{fontSize:9.5,color:C.sub,textTransform:"uppercase"}}>{label}</div>
+  <div className="mono" style={{fontSize:15,fontWeight:600,color:color||C.ink}}>{v}</div></div>);}
 
 function Big({label,value,color}){return(
   <div><div className="mono" style={{fontSize:10,color:C.sub,textTransform:"uppercase"}}>{label}</div>

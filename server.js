@@ -26,6 +26,7 @@ const PORT = process.env.PORT || 8787;
 const ALLOW_ORIGIN = process.env.ALLOW_ORIGIN || "*";
 const NASS_KEY = process.env.NASS_KEY || "";
 const AMS_KEY = process.env.AMS_KEY || ""; // USDA Market News (MARS) API key
+const FAS_KEY = process.env.FAS_KEY || ""; // USDA FAS Open Data (api.data.gov) key, for live imports
 
 // ---- CORS + tiny in-memory cache ----
 app.use((req, res, next) => {
@@ -192,6 +193,56 @@ const FRESH_CLASS = { TOMATOES: "FRESH MARKET" };
 // with the frontend CROPS defaults.
 const FRESH_YIELD_DEFAULT = { TOMATOES: 350 };
 
+// ---- Fresh-produce IMPORTS → domestic price → recovery-market swings ----
+// Imports add to total US supply. Fresh produce demand is highly inelastic, so a
+// small supply change moves the farm-gate price a lot (price flexibility = the
+// % price move per 1% quantity move). When imports surge, domestic price drops,
+// margins collapse, and economic abandonment / unsold volume spikes — i.e. the
+// rescue/waste market swings hard. How hard depends on the crop's IMPORT_SHARE
+// (imports as a share of US fresh supply) and PRICE_FLEX.
+//
+// IMPORT_SHARE: import share of US FRESH supply, approximate, USDA ERS Fruit &
+//   Vegetable / FATUS orders of magnitude. Tomatoes & berries are import-heavy
+//   (Mexico/counter-season); potatoes/lettuce mostly domestic; apples a net
+//   exporter with modest counter-seasonal imports.
+// PRICE_FLEX: |%Δprice / %Δquantity|. More perishable = more inelastic = higher.
+const IMPORT_SHARE = { TOMATOES: 0.60, STRAWBERRIES: 0.18, LETTUCE: 0.05, APPLES: 0.06, POTATOES: 0.09 };
+const PRICE_FLEX   = { TOMATOES: 2.5,  STRAWBERRIES: 2.2,  LETTUCE: 2.0,  APPLES: 1.6,  POTATOES: 1.7 };
+// How a fractional farm-gate price DROP converts to extra economic abandonment /
+// unsold volume that lands in the rescue market. 0.7 → a 40% price drop pushes
+// ~28% of in-window volume into rescue (capped at IMPORT_ABANDON_CAP).
+const IMPORT_ABANDON_SENS = 0.7;
+const IMPORT_ABANDON_CAP = 0.5;
+
+// HS-6 import codes (fresh/chilled) for live FAS GATS US-import volume lookups.
+// Verified against the live FAS GATS HS6Commodities list (e.g. 070200 = "Tomatoes,
+// Fresh Or Chilled"). FAS census-import rows are at HS-10 grain, so we match any
+// hS10Code beginning with the HS-6 prefix.
+const IMPORT_HS = { TOMATOES: "070200", STRAWBERRIES: "081010", LETTUCE: "070511", APPLES: "080810", POTATOES: "070190" };
+
+// FAS GATS censusImports is keyed by PARTNER COUNTRY (there is no "World" aggregate
+// — partnerCode 0/region codes return nothing). US fresh-produce imports are highly
+// concentrated, so we sum the dominant source countries per crop as a close proxy
+// for the live total. Codes are GATS country codes (MX = Mexico, CA = Canada,
+// CL = Chile). The structural IMPORT_SHARE above still drives the swing model; this
+// live volume is context only, and is labeled with the sources used.
+const IMPORT_PARTNERS = {
+  TOMATOES: ["MX", "CA"], STRAWBERRIES: ["MX"], LETTUCE: ["MX", "CA"],
+  APPLES: ["CL", "CA"], POTATOES: ["CA"],
+};
+
+// Price displacement from an import shock. `shock` is the fractional change in
+// import volume the user is simulating (−1..+1); at 0 the price is unchanged (the
+// live NASS price already embeds today's imports, so we don't double-count).
+//   %Δsupply = shock × importShare ;  priceFactor = 1 − flex × %Δsupply
+// Clamped so an extreme scenario can't drive price to zero or unbounded.
+function importPriceFactor(crop, shock) {
+  const s = IMPORT_SHARE[crop] ?? 0;
+  const flex = PRICE_FLEX[crop] ?? 2.0;
+  const k = Math.max(-1, Math.min(1, Number(shock) || 0));
+  return Math.max(0.25, Math.min(2.5, 1 - flex * k * s));
+}
+
 // Fetch NASS rows pinned to the crop's fresh-market class when one exists, with a
 // safe fallback to the unpinned (all-class) query if the fresh class has no rows
 // for this crop/state — so non-split crops (and odd coverage gaps) still resolve.
@@ -323,7 +374,7 @@ function cumAtDoy(curve, doy) {
 }
 
 app.get("/api/health", (_req, res) =>
-  res.json({ ok: true, nassKey: !!NASS_KEY, amsKey: !!AMS_KEY })
+  res.json({ ok: true, nassKey: !!NASS_KEY, amsKey: !!AMS_KEY, fasKey: !!FAS_KEY })
 );
 
 // ---- USDA NASS Quick Stats: latest state planted acres ----
@@ -451,6 +502,109 @@ app.get("/api/price", async (req, res) => {
   }
 });
 
+// ---- Fresh-produce imports (structural share + live FAS volume/trend) ----
+// Always returns the curated structural import share + price flexibility (what the
+// swing model needs), so the feature works with no key. When FAS_KEY is set it
+// also attaches live USDA FAS GATS US-import volume and its year-over-year change
+// as CONTEXT — best effort: any FAS failure degrades to curated-only, never errors.
+//
+// Verified live contract (api.fas.usda.gov, X-Api-Key header):
+//   • /api/gats/census/data/imports/dataReleaseDates → latest statisticalYearMonth
+//   • /api/gats/censusImports/partnerCode/{country}/year/{Y}/month/{M}
+//        → rows at HS-10 grain: { hS10Code, quantity1, censusUOMId1, value, ... }
+//        (no World aggregate exists; partner is a country code, so we sum the
+//         dominant source countries per crop — see IMPORT_PARTNERS.)
+//   • Census import quantity1 is in censusUOMId1 units: 47 = KG, 70 = Metric Tons.
+const LBS_PER_KG = 2.20462;
+const FAS_BASE = "https://api.fas.usda.gov";
+const UOM_TO_KG = { 47: 1, 70: 1000 }; // censusUOMId → kilograms per unit (else assume kg)
+async function fasGet(path) {
+  const r = await fetch(`${FAS_BASE}${path}`, { headers: { "X-Api-Key": FAS_KEY, Accept: "application/json" } });
+  if (!r.ok) throw new Error(`FAS ${r.status} on ${path}`);
+  return r.json();
+}
+// Most recent census-import month FAS has published, as a {year, month} pair.
+async function fasLatestImportMonth() {
+  const ck = "fas:latestImportYM";
+  const cached = getCached(ck);
+  if (cached) return cached;
+  const rows = await fasGet("/api/gats/census/data/imports/dataReleaseDates");
+  const yms = (Array.isArray(rows) ? rows : [])
+    .map((x) => String(x.statisticalYearMonth || ""))
+    .filter((s) => /^\d{6}$/.test(s)).sort();
+  const latest = yms[yms.length - 1];
+  if (!latest) throw new Error("no FAS release dates");
+  const out = { year: +latest.slice(0, 4), month: +latest.slice(4, 6) };
+  setCached(ck, out, 1000 * 60 * 60 * 12);
+  return out;
+}
+// Total US import volume (CWT) of one HS-6 from one partner country in one month.
+// FAS rows are HS-10, so we match any hS10Code beginning with the HS-6 prefix.
+async function fasMonthImportCwt(partner, hs6, year, month) {
+  const rows = await fasGet(`/api/gats/censusImports/partnerCode/${partner}/year/${year}/month/${month}`);
+  if (!Array.isArray(rows)) return 0;
+  let kg = 0;
+  for (const x of rows) {
+    if (!String(x.hS10Code || "").startsWith(hs6)) continue;
+    const perUnitKg = UOM_TO_KG[x.censusUOMId1] ?? 1;
+    const q = Number(x.quantity1);
+    if (Number.isFinite(q)) kg += q * perUnitKg;
+  }
+  return (kg * LBS_PER_KG) / 100; // CWT
+}
+// Sum the dominant source countries for a crop in one (year, month).
+async function fasImportCwt(partners, hs6, year, month) {
+  const parts = await Promise.all(partners.map((p) => fasMonthImportCwt(p, hs6, year, month).catch(() => 0)));
+  return parts.reduce((a, b) => a + b, 0);
+}
+app.get("/api/imports", async (req, res) => {
+  const crop = String(req.query.crop || "").toUpperCase();
+  if (!crop) return res.status(400).json({ error: "crop required" });
+  const importShare = IMPORT_SHARE[crop] ?? null;
+  const priceFlex = PRICE_FLEX[crop] ?? null;
+  const hs = IMPORT_HS[crop] || null;
+  const partners = IMPORT_PARTNERS[crop] || [];
+  const base = { crop, importShare, priceFlex, hs, live: null };
+
+  if (importShare == null) return res.json({ ...base, note: "no import model for this crop" });
+
+  const ck = `imports:${crop}`;
+  const cached = getCached(ck);
+  if (cached) return res.json({ ...cached, cached: true });
+
+  if (!FAS_KEY || !hs || !partners.length) {
+    base.note = FAS_KEY ? "no HS code / partner for crop" : "FAS_KEY not configured — using curated structural share only";
+    setCached(ck, base, 1000 * 60 * 60 * 6);
+    return res.json(base);
+  }
+
+  // Latest published month vs the same month a year earlier → year-over-year change,
+  // summed across the crop's dominant import sources.
+  try {
+    const { year, month } = await fasLatestImportMonth();
+    const [vol, priorYrVol] = await Promise.all([
+      fasImportCwt(partners, hs, year, month),
+      fasImportCwt(partners, hs, year - 1, month).catch(() => null),
+    ]);
+    const yoyPct = priorYrVol && priorYrVol > 0 ? +(((vol - priorYrVol) / priorYrVol)).toFixed(3) : null;
+    base.live = {
+      volCwt: Math.round(vol),
+      priorVolCwt: priorYrVol != null ? Math.round(priorYrVol) : null,
+      yoyPct,
+      period: `${year}-${String(month).padStart(2, "0")}`,
+      partners,
+      source: `USDA FAS GATS census imports · ${partners.join("+")}`,
+    };
+    base.note = "live FAS import volume (dominant sources) attached as context; structural share drives the swing model";
+    setCached(ck, base, 1000 * 60 * 60 * 12);
+    res.json(base);
+  } catch (e) {
+    base.note = `live FAS lookup failed (${String(e)}); using curated structural share`;
+    setCached(ck, base, 1000 * 60 * 30); // shorter TTL so a transient FAS error retries sooner
+    res.json(base);
+  }
+});
+
 // ---- USDA NASS Quick Stats: county planted + harvested + yield for one state ----
 // Returns measured area planted AND harvested (their gap = real abandonment) plus
 // yield, so the client computes real production instead of acres × assumed yield.
@@ -522,10 +676,14 @@ app.get("/api/nass/state-acres", async (req, res) => {
 app.get("/api/forecast/rescue", async (req, res) => {
   const crop = String(req.query.crop || "").toUpperCase();
   const horizon = Number(req.query.horizon) === 90 ? 90 : 30;
+  // import-shock scenario: fractional change in import volume (−1..+1). 0 = status
+  // quo (live price already embeds today's imports). A surge crashes price and
+  // pushes extra volume into the rescue market; see importPriceFactor / uplift below.
+  const importShock = Math.max(-1, Math.min(1, Number(req.query.importShock) || 0));
   if (!NASS_KEY) return res.status(500).json({ error: "NASS_KEY not configured" });
   if (!crop) return res.status(400).json({ error: "crop required" });
 
-  const ck = `fcast:${crop}:${horizon}`;
+  const ck = `fcast:${crop}:${horizon}:imp${importShock.toFixed(2)}`;
   const cached = getCached(ck);
   if (cached) return res.json({ ...cached, cached: true });
 
@@ -617,6 +775,13 @@ app.get("/api/forecast/rescue", async (req, res) => {
     const isCitrus = CITRUS_CROPS.has(crop);
     let usedCalendar = false;
 
+    // import-shock → national price displacement → extra rescue volume. priceFactor
+    // < 1 means an import surge has crashed price; the fractional drop drives an
+    // economic-abandonment uplift applied to in-window volume (national effect, so
+    // computed once and applied per state). At importShock 0 this is a no-op.
+    const priceFactor = importPriceFactor(crop, importShock);
+    const importEconRate = Math.max(0, Math.min(IMPORT_ABANDON_CAP, IMPORT_ABANDON_SENS * Math.max(0, 1 - priceFactor)));
+
     const states = [];
     for (const [st, a] of Object.entries(recByState)) {
       const curve = curveByState[st] || staticCurve;
@@ -660,11 +825,14 @@ app.get("/api/forecast/rescue", async (req, res) => {
       // of the volume entering harvest, the share expected to sell successfully.
       // citrus at-risk fruit is a subset of volume; field/tree unsold is a fraction
       // of volume (the in-field gap is separate, unharvested crop on top of volume).
+      // extra rescue volume created by the import-shock price crash (0 at shock 0)
+      const importDrivenRescue = volume != null ? volume * importEconRate : null;
+      // of the volume entering harvest, the share expected to sell successfully —
+      // now also net of the import-driven economic loss.
       let pendingToMarket = null;
       if (volume != null) {
-        pendingToMarket = isCitrus
-          ? Math.max(0, volume - (lostInField || 0))
-          : Math.max(0, volume - (availableForRescue || 0));
+        const already = isCitrus ? (lostInField || 0) : (availableForRescue || 0);
+        pendingToMarket = Math.max(0, volume - already - (importDrivenRescue || 0));
       }
       states.push({ state: st, year: a.year, harvestedAcres, plantedAcres, gapAcres,
         yield: yld, yieldUnit: a.yieldUnit, yieldSource: freshYield != null ? "fresh-default" : "NASS",
@@ -672,10 +840,11 @@ app.get("/api/forecast/rescue", async (req, res) => {
         windowFromCalendar: fromCalendar,
         volumeEnteringHarvest: volume, conditionRisk: risk, conditionWeek: c ? c.week : null,
         econAbandonRisk, onTreeReturn,
-        unsoldRate: isCitrus ? null : unsoldRate, availableForRescue, lostInField, pendingToMarket });
+        unsoldRate: isCitrus ? null : unsoldRate, availableForRescue, lostInField,
+        importDrivenRescue, pendingToMarket });
     }
-    // rank by total rescuable in window (unsold + in-field), then by volume
-    const rescuable = (s) => (s.availableForRescue || 0) + (s.lostInField || 0);
+    // rank by total rescuable in window (unsold + in-field + import-driven), then volume
+    const rescuable = (s) => (s.availableForRescue || 0) + (s.lostInField || 0) + (s.importDrivenRescue || 0);
     states.sort((x, y) => rescuable(y) - rescuable(x) || (y.volumeEnteringHarvest || 0) - (x.volumeEnteringHarvest || 0));
 
     const haveCurves = states.filter((s) => s.windowHarvestPct != null).length;
@@ -684,6 +853,9 @@ app.get("/api/forecast/rescue", async (req, res) => {
       yieldUnit: CROP_YIELD_UNIT[crop], unsoldRate: isCitrus ? null : unsoldRate,
       windowSource: isCitrus ? "citrus-season" : (usedCalendar ? "static-calendar" : "live-progress"),
       cropKind,
+      // import-shock scenario echo: what was simulated and its modeled effect.
+      importShock, importShare: IMPORT_SHARE[crop] ?? null, priceFactor: +priceFactor.toFixed(3),
+      importEconRate: +importEconRate.toFixed(3),
       // citrus: in-field channel IS available, but as an ECONOMIC estimate (volume x
       // on-tree abandonment risk), not a measured acreage gap.
       inFieldAvailable: isCitrus || !isTree,

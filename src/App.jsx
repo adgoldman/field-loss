@@ -14,6 +14,10 @@ const TABS = [
 export default function App() {
   const [i, setI] = useState(0);
   const [countyInit, setCountyInit] = useState(null); // {state, crop} drilled from national map
+  // One import-shock lever shared across every tab: the fractional change in fresh
+  // imports being simulated (−1..+1). 0 = status quo. Lifted here so adjusting it
+  // in any view (Estimator slider) flows through Map / County / Rescue forecast.
+  const [importShock, setImportShock] = useState(0);
 
   function drillToCounty(state, crop) {
     setCountyInit({ state, crop, at: Date.now() });
@@ -21,9 +25,10 @@ export default function App() {
   }
 
   const View = TABS[i][1];
+  const shock = { importShock, setImportShock };
   const viewProps =
-    i === 1 ? { onDrill: drillToCounty } :
-    i === 2 ? { init: countyInit } : {};
+    i === 1 ? { onDrill: drillToCounty, ...shock } :
+    i === 2 ? { init: countyInit, ...shock } : shock;
 
   return (
     <div style={{ minHeight: "100vh", background: "#F4F1E8", fontFamily: "'Archivo', system-ui, sans-serif" }}>
