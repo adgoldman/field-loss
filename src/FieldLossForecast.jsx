@@ -47,31 +47,43 @@ function riskColor(r) {
   return C.field;
 }
 
-export default function FieldLossForecast() {
+export default function FieldLossForecast({ importShock = 0, setImportShock }) {
   const [crop, setCrop] = useState("tomatoes");
   const [horizon, setHorizon] = useState(30);
   const [data, setData] = useState({ status: "idle", states: [] });
+  const [imp, setImp] = useState(null); // import exposure (share + flex + live FAS) for this crop
 
   useEffect(() => {
     let cancelled = false;
     setData(d => ({ ...d, status: "loading" }));
-    fetch(`${DEFAULT_PROXY}/api/forecast/rescue?crop=${CROPS[crop].nass}&horizon=${horizon}`)
+    fetch(`${DEFAULT_PROXY}/api/forecast/rescue?crop=${CROPS[crop].nass}&horizon=${horizon}&importShock=${importShock}`)
       .then(r => r.ok ? r.json() : Promise.reject(new Error(`proxy ${r.status}`)))
       .then(d => { if (!cancelled) setData({ status: "ok", ...d }); })
       .catch(e => { if (!cancelled) setData({ status: "error", error: String(e), states: [] }); });
     return () => { cancelled = true; };
-  }, [crop, horizon]);
+  }, [crop, horizon, importShock]);
+
+  // import exposure for this crop → drives the shared import-shock lever readouts
+  useEffect(() => {
+    let cancelled = false;
+    setImp(null);
+    fetch(`${DEFAULT_PROXY}/api/imports?crop=${CROPS[crop].nass}`)
+      .then(r => r.ok ? r.json() : null).catch(() => null)
+      .then(d => { if (!cancelled) setImp(d); });
+    return () => { cancelled = true; };
+  }, [crop]);
 
   const rows = useMemo(() => {
     const lbs = CROPS[crop].lbs;
     const toTons = v => (Number.isFinite(v) ? v : 0) * lbs / 2000;
     return (data.states || [])
-      .filter(s => (s.availableForRescue || 0) + (s.lostInField || 0) > 0)
+      .filter(s => (s.availableForRescue || 0) + (s.lostInField || 0) + (s.importDrivenRescue || 0) > 0)
       .map(s => ({
         ...s,
         unsoldTons: toTons(s.availableForRescue),
         inFieldTons: toTons(s.lostInField),
         pendingTons: toTons(s.pendingToMarket),
+        importTons: toTons(s.importDrivenRescue),
       }));
   }, [data, crop]);
 
@@ -79,6 +91,7 @@ export default function FieldLossForecast() {
   const totalUnsold = rows.reduce((a, r) => a + r.unsoldTons, 0);
   const totalInField = rows.reduce((a, r) => a + r.inFieldTons, 0);
   const totalPending = rows.reduce((a, r) => a + r.pendingTons, 0);
+  const totalImport = rows.reduce((a, r) => a + r.importTons, 0);
   const unit = data.yieldUnit || CROPS[crop].nass;
   // citrus has no measured rescue channels; its in-field figure is an economic
   // at-risk estimate (volume × on-tree-abandonment risk) and "unsold" is n/a.
@@ -138,6 +151,9 @@ export default function FieldLossForecast() {
         ))}
       </div>
 
+      <ImportShockBar imp={imp} data={data} importShock={importShock} setImportShock={setImportShock}
+        importTons={totalImport} isCitrus={isCitrus} />
+
       {data.status === "loading" && <p style={{ color: C.sub, fontSize: 13 }}>Loading live NASS progress + condition…</p>}
       {data.status === "error" && <p style={{ color: C.clay, fontSize: 13 }}>Proxy error: {data.error}. Is the proxy running on :8787?</p>}
       {data.note && <p style={{ color: C.soil, fontSize: 13, background: "#F3EDDD", padding: "8px 10px", borderRadius: 6 }}>{data.note}</p>}
@@ -149,6 +165,9 @@ export default function FieldLossForecast() {
             <Stat label="Pending to market" value={`${fmt(totalPending, 0)} tons`} color={C.field} />
             <Stat label="Harvested · unsold" value={isCitrus ? "n/a" : `${fmt(totalUnsold, 0)} tons`} color={C.clay} />
             <Stat label={isCitrus ? "On-tree at-risk (econ)" : "Unharvested · in field"} value={data.inFieldAvailable === false ? "n/a" : `${fmt(totalInField, 0)} tons`} color={C.soil} />
+            {!isCitrus && importShock !== 0 && (
+              <Stat label="Import-driven rescue" value={`${fmt(totalImport, 0)} tons`} color={C.clay} />
+            )}
             <Stat label="States in window" value={String(rows.length)} />
           </div>
 
@@ -159,6 +178,7 @@ export default function FieldLossForecast() {
                   <Th>#</Th><Th>State</Th><Th>Yr</Th><Th right>Harvest in window</Th>
                   <Th right>Volume entering ({unit})</Th><Th right>{isCitrus ? "On-tree abandon risk" : "Condition risk"}</Th>
                   <Th right>Pending to market</Th><Th right>Harvested · unsold</Th><Th right>{isCitrus ? "On-tree at-risk" : "Unharvested · in field"}</Th>
+                  {!isCitrus && importShock !== 0 && <Th right>Import-driven</Th>}
                 </tr>
               </thead>
               <tbody>
@@ -182,6 +202,9 @@ export default function FieldLossForecast() {
                     <Td right mono style={{ color: r.pendingTons > 0 ? C.field : C.sub }}>{r.pendingTons > 0 ? `${fmt(r.pendingTons, 0)} t` : "—"}</Td>
                     <Td right mono style={{ color: r.unsoldTons > 0 ? C.clay : C.sub }}>{isCitrus ? "n/a" : (r.unsoldTons > 0 ? `${fmt(r.unsoldTons, 0)} t` : "—")}</Td>
                     <Td right mono style={{ color: r.inFieldTons > 0 ? C.soil : C.sub }}>{r.inFieldTons > 0 ? `${fmt(r.inFieldTons, 0)} t` : "—"}</Td>
+                    {!isCitrus && importShock !== 0 && (
+                      <Td right mono style={{ color: r.importTons > 0 ? C.clay : C.sub }}>{r.importTons > 0 ? `${fmt(r.importTons, 0)} t` : "—"}</Td>
+                    )}
                   </tr>
                 ))}
               </tbody>
@@ -213,6 +236,62 @@ export default function FieldLossForecast() {
   );
 }
 
+// Shared import-shock lever — same state + server model as the other tabs. Moving
+// it re-fetches /api/forecast/rescue with importShock, so a simulated change in
+// fresh imports collapses margins → extra economic abandonment → import-driven
+// rescue volume per state. No-op for citrus (no import model for oranges/lemons).
+function ImportShockBar({ imp, data, importShock, setImportShock, importTons, isCitrus }) {
+  const pct = Math.round((importShock || 0) * 100);
+  const share = imp?.importShare ?? null;
+  const flex = imp?.priceFlex ?? null;
+  const factor = data?.priceFactor != null ? data.priceFactor : 1;
+  const live = imp?.live;
+  return (
+    <div style={{ border: `1px solid ${C.line}`, background: C.panel, borderRadius: 10, padding: "12px 14px", margin: "0 0 12px", maxWidth: 760 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontSize: 11, color: C.sub, textTransform: "uppercase", letterSpacing: 1, fontFamily: "'IBM Plex Mono', monospace" }}>Import shock → recovery-market swing</div>
+        <div style={{ fontSize: 12, fontFamily: "'IBM Plex Mono', monospace", color: importShock === 0 ? C.sub : (importShock > 0 ? C.clay : C.field) }}>
+          {pct > 0 ? `+${pct}` : pct}% fresh imports {importShock === 0 ? "· status quo" : ""}
+        </div>
+      </div>
+      <input type="range" min={-100} max={100} step={5} value={pct}
+        onChange={e => setImportShock && setImportShock(Number(e.target.value) / 100)}
+        style={{ width: "100%", margin: "10px 0 4px", accentColor: C.clay }} />
+      <div style={{ display: "flex", justifyContent: "space-between" }}>
+        <span style={{ fontSize: 10, color: C.sub, fontFamily: "'IBM Plex Mono', monospace" }}>−100% (import collapse)</span>
+        <span style={{ fontSize: 10, color: C.sub, fontFamily: "'IBM Plex Mono', monospace" }}>+100% (import surge)</span>
+      </div>
+      {isCitrus ? (
+        <div style={{ fontSize: 11, color: C.soil, marginTop: 8, fontFamily: "'IBM Plex Mono', monospace" }}>
+          No fresh-import model for citrus — the lever does not affect oranges/lemons.
+        </div>
+      ) : (
+        <>
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 10 }}>
+            <Mini label="Import share" v={share != null ? `${fmt(share * 100, 0)}%` : "—"} />
+            <Mini label="Price flexibility" v={flex != null ? fmt(flex, 1) : "—"} />
+            <Mini label="Price factor" v={`×${fmt(factor, 2)}`} color={factor < 1 ? C.clay : (factor > 1 ? C.field : C.ink)} />
+            <Mini label="Import-driven rescue" v={importShock !== 0 ? `${fmt(importTons, 0)} t` : "—"} color={C.clay} />
+          </div>
+          <div style={{ fontSize: 11, color: C.sub, marginTop: 8, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace" }}>
+            {live
+              ? `FAS live: ${fmt(live.volCwt / 1000)}k cwt in ${live.period}${live.yoyPct != null ? ` (${live.yoyPct > 0 ? "+" : ""}${fmt(live.yoyPct * 100, 1)}% YoY)` : ""} · ${live.source}`
+              : (imp?.note || "structural import share (live FAS volume unavailable)")}
+            . Live price already embeds today's imports — move the lever to simulate a change.
+          </div>
+        </>
+      )}
+    </div>
+  );
+}
+function Mini({ label, v, color }) {
+  return (
+    <div>
+      <div style={{ fontSize: 9.5, color: C.sub, textTransform: "uppercase", fontFamily: "'IBM Plex Mono', monospace" }}>{label}</div>
+      <div style={{ fontSize: 15, fontWeight: 600, color: color || C.ink, fontFamily: "'IBM Plex Mono', monospace" }}>{v}</div>
+    </div>
+  );
+}
 function Stat({ label, value, color }) {
   return (
     <div>
