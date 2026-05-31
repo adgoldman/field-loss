@@ -72,6 +72,13 @@ const clamp=(x,a,b)=>Math.max(a,Math.min(b,x));
 function hex2rgb(h){return [parseInt(h.slice(1,3),16),parseInt(h.slice(3,5),16),parseInt(h.slice(5,7),16)];}
 function lerpColor(a,b,t){const A=hex2rgb(a),B=hex2rgb(b);const m=A.map((v,i)=>Math.round(v+(B[i]-v)*clamp(t,0,1)));return `rgb(${m[0]},${m[1]},${m[2]})`;}
 
+// Crops NASS publishes ONLY as ALL CLASSES (fresh + processing combined) with no
+// isolable fresh series — e.g. tomatoes, whose combined per-acre yield is
+// processing-dominated. For these we keep live acres + price but use the curated
+// fresh-market yield default, so production reflects fresh produce, not cannery
+// tonnage. (Keyed by NASS commodity name.)
+const NO_LIVE_FRESH_YIELD = new Set(["TOMATOES"]);
+
 // Loss model. `area` carries live NASS figures: { planted, harvested, yield, yieldUnit }.
 // Abandonment is MEASURED from the planted−harvested gap when both exist (same year);
 // otherwise it falls back to the economic (margin) model. Production uses real NASS
@@ -82,9 +89,10 @@ function modelState(crop, area, wx, priceOverride) {
   const planted = Number(area?.planted) || 0;
   const harvestedRaw = Number(area?.harvested) || 0;
   const yUnit = String(area?.yieldUnit || "").toUpperCase();
-  const realYield = (Number(area?.yield) > 0 && yUnit.includes(c.unit.toUpperCase())) ? Number(area.yield) : null;
+  const noFreshYield = NO_LIVE_FRESH_YIELD.has(c.nass);
+  const realYield = (!noFreshYield && Number(area?.yield) > 0 && yUnit.includes(c.unit.toUpperCase())) ? Number(area.yield) : null;
   const yieldPerAc = realYield || c.yield;
-  const yieldSource = realYield ? "NASS" : "assumed";
+  const yieldSource = realYield ? "NASS" : (noFreshYield ? "fresh default" : "assumed");
 
   const haveGap = planted > 0 && harvestedRaw > 0 && harvestedRaw <= planted * 1.02;
   let gross, production, abandonedVol, fAband, harvested, abandonSource;

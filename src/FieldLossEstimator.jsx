@@ -26,6 +26,13 @@ const CROPS = {
   strawberries:{ label: "Strawberries",   nass: "STRAWBERRIES",unit: "cwt", lbsPerUnit: 100, yield: 500, price: 90.0,  harvestCost: 60.0, baseLoss: 0.120, perish: 1.00 },
 };
 
+// Crops NASS publishes ONLY as ALL CLASSES (fresh + processing combined) with no
+// isolable fresh series — e.g. tomatoes, whose combined per-acre yield is
+// processing-dominated. For these we keep live acres + price but use the curated
+// fresh-market yield default, so the loss math reflects fresh produce, not cannery
+// tonnage. (Keyed by NASS commodity name.)
+const NO_LIVE_FRESH_YIELD = new Set(["TOMATOES"]);
+
 // ---- US state centroids for weather lookup ----
 const STATES = {
   AL:[32.8,-86.8],AK:[64.1,-152.3],AZ:[34.2,-111.7],AR:[34.9,-92.4],CA:[37.2,-119.4],
@@ -122,10 +129,18 @@ export default function FieldLossEstimator() {
       // acreage: planted preferred, harvested fallback (tree crops report harvested)
       const ac = row ? (Number(row.planted) || Number(row.harvested) || 0) : 0;
       if (ac > 0) { setAcres(ac); setAcresSource("nass"); parts.push(`${row.year} ${row.planted ? "planted" : "harvested"} acres`); }
-      // yield — only when the NASS unit matches the crop's display unit (e.g. CWT)
+      // yield — only when the NASS unit matches the crop's display unit (e.g. CWT).
+      // For crops NASS reports only as ALL CLASSES (fresh + processing combined,
+      // e.g. tomatoes), the live per-acre yield is processing-dominated, so we keep
+      // the curated fresh-market default instead of importing it.
+      const noFreshYield = NO_LIVE_FRESH_YIELD.has(c.nass);
       const unitOk = row && String(row.yieldUnit || "").toUpperCase().includes(c.unit.toUpperCase());
-      if (row && Number(row.yield) > 0 && unitOk) { setA((a) => ({ ...a, yield: Number(row.yield) })); parts.push(`yield ${fmt(Number(row.yield))}`); }
-      else setA((a) => ({ ...a, yield: c.yield }));
+      if (!noFreshYield && row && Number(row.yield) > 0 && unitOk) {
+        setA((a) => ({ ...a, yield: Number(row.yield) })); parts.push(`yield ${fmt(Number(row.yield))}`);
+      } else {
+        setA((a) => ({ ...a, yield: c.yield }));
+        if (noFreshYield && row && Number(row.yield) > 0) parts.push(`fresh-market yield ${fmt(c.yield)} (NASS publishes tomatoes only as combined incl. processing)`);
+      }
       // national farm-gate price ($/cwt)
       if (pr && pr.price > 0) { setA((a) => ({ ...a, price: pr.price })); parts.push(`price $${pr.price}/cwt (${pr.year})`); }
       else setA((a) => ({ ...a, price: c.price }));

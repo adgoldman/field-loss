@@ -176,6 +176,38 @@ async function nassFetchSoft(paramsObj) {
   try { return await nassFetch(paramsObj); }
   catch (e) { if (String(e).includes("NASS 400")) return []; throw e; }
 }
+
+// Some crops are split by NASS into fresh-market vs processing classes whose
+// acreage, yield and price differ wildly (processing tomatoes yield ~10x fresh).
+// This app only models fresh produce a food bank would rescue, so for these crops
+// we pin queries to the fresh-market class. Crops absent here have a single
+// (ALL CLASSES) series and need no pin. Easy to extend: crop -> NASS class_desc.
+const FRESH_CLASS = { TOMATOES: "FRESH MARKET" };
+
+// For fresh/processing-split crops NASS publishes ONLY as ALL CLASSES at the
+// state/county/national level (no isolable fresh series since ~2017), the live
+// per-acre yield is processing-dominated (e.g. CA tomatoes ~1,100 CWT/acre vs a
+// fresh-market ~350). This app models fresh produce a food bank rescues, so we
+// substitute a curated fresh-market yield (CWT/ACRE) for these crops. Kept in sync
+// with the frontend CROPS defaults.
+const FRESH_YIELD_DEFAULT = { TOMATOES: 350 };
+
+// Fetch NASS rows pinned to the crop's fresh-market class when one exists, with a
+// safe fallback to the unpinned (all-class) query if the fresh class has no rows
+// for this crop/state — so non-split crops (and odd coverage gaps) still resolve.
+// The fresh attempt is best-effort: ANY error (not just a zero-match 400) falls
+// through to the unpinned query, so adding a pin can never make a crop fail.
+async function nassFetchFresh(paramsObj) {
+  const crop = String(paramsObj.commodity_desc || "").toUpperCase();
+  const fresh = FRESH_CLASS[crop];
+  if (fresh) {
+    try {
+      const rows = await nassFetchSoft({ ...paramsObj, class_desc: fresh });
+      if (rows.length) return rows;
+    } catch { /* fall back to unpinned below */ }
+  }
+  return nassFetchSoft(paramsObj);
+}
 // Reduce NASS acreage + yield rows into one record per area. Crucially, planted
 // and harvested are taken from the SAME (latest shared) year so their gap is a
 // real abandonment figure rather than an artifact of comparing different years
@@ -306,8 +338,9 @@ app.get("/api/nass/planted-acres", async (req, res) => {
   if (cached) return res.json({ ...cached, cached: true });
 
   // Query one acreage series for this crop/state; returns null if the series
-  // doesn't exist (NASS 400) or has no usable rows.
-  const queryAcres = async (stat) => {
+  // doesn't exist (NASS 400) or has no usable rows. `cls` optionally pins the
+  // crop's class (e.g. fresh-market vs processing tomatoes).
+  const queryAcres = async (stat, cls) => {
     const params = new URLSearchParams({
       key: NASS_KEY,
       commodity_desc: crop,
@@ -317,6 +350,7 @@ app.get("/api/nass/planted-acres", async (req, res) => {
       state_alpha: state,
       format: "JSON",
     });
+    if (cls) params.set("class_desc", cls);
     if (req.query.year) params.set("year", String(req.query.year));
     else params.set("year__GE", "2021");
     const r = await fetch(`https://quickstats.nass.usda.gov/api/api_GET/?${params}`);
@@ -325,15 +359,22 @@ app.get("/api/nass/planted-acres", async (req, res) => {
     const rows = (json.data || []).filter((x) => x.Value && x.Value !== "(D)");
     if (!rows.length) return null;
     rows.sort((a, b) => Number(b.year) - Number(a.year));
-    return { acres: Number(String(rows[0].Value).replace(/,/g, "")), year: rows[0].year, stat };
+    return { acres: Number(String(rows[0].Value).replace(/,/g, "")), year: rows[0].year, stat, class: cls || null };
   };
 
   try {
     // Fresh produce often reports AREA HARVESTED but not AREA PLANTED, and tree
     // crops (apples) report neither as PLANTED — fall back so every crop resolves.
-    const hit = (await queryAcres("AREA PLANTED")) || (await queryAcres("AREA HARVESTED"));
+    // For fresh/processing-split crops, try the fresh-market class first so we
+    // don't sum fresh + processing acres; fall back to the unpinned query.
+    const fresh = FRESH_CLASS[crop];
+    const hit =
+      (fresh && (await queryAcres("AREA PLANTED", fresh))) ||
+      (fresh && (await queryAcres("AREA HARVESTED", fresh))) ||
+      (await queryAcres("AREA PLANTED")) ||
+      (await queryAcres("AREA HARVESTED"));
     if (!hit) return res.json({ crop, state, acres: null, note: "no rows" });
-    const out = { crop, state, year: hit.year, acres: hit.acres, stat: hit.stat };
+    const out = { crop, state, year: hit.year, acres: hit.acres, stat: hit.stat, class: hit.class };
     setCached(ck, out, 1000 * 60 * 60 * 12); // 12h
     res.json(out);
   } catch (e) {
@@ -387,9 +428,17 @@ app.get("/api/price", async (req, res) => {
       (x) => x.Value && x.Value !== "(D)" && PRICE_UNIT_TO_CWT[x.unit_desc] != null
     );
     if (!rows.length) return res.json({ crop, price: null, note: "no price rows" });
-    // latest year; within it prefer a FRESH class over processing/other.
-    rows.sort((a, b) => Number(b.year) - Number(a.year));
-    const latest = rows.filter((x) => x.year === rows[0].year);
+    // For fresh/processing-split crops (e.g. tomatoes) restrict to fresh-market
+    // rows so the latest-year pick can't land on a processing price; fall back to
+    // all rows if no fresh class exists. Then take the latest year, preferring a
+    // FRESH class within it.
+    let pool = rows;
+    if (FRESH_CLASS[crop]) {
+      const f = rows.filter((x) => /FRESH/.test(x.class_desc || ""));
+      if (f.length) pool = f;
+    }
+    pool.sort((a, b) => Number(b.year) - Number(a.year));
+    const latest = pool.filter((x) => x.year === pool[0].year);
     const pick = latest.find((x) => /FRESH/.test(x.class_desc || "")) || latest[0];
     const raw = Number(String(pick.Value).replace(/,/g, ""));
     const price = +(raw * PRICE_UNIT_TO_CWT[pick.unit_desc]).toFixed(2);
@@ -418,8 +467,8 @@ app.get("/api/nass/county-acres", async (req, res) => {
   const base = { commodity_desc: crop, agg_level_desc: "COUNTY", state_alpha: state, year__GE: "2017" };
   try {
     const [acreRows, yieldRows] = await Promise.all([
-      nassFetch({ ...base, unit_desc: "ACRES" }),        // AREA PLANTED + AREA HARVESTED
-      nassFetch({ ...base, statisticcat_desc: "YIELD" }),
+      nassFetchFresh({ ...base, unit_desc: "ACRES" }),        // AREA PLANTED + AREA HARVESTED
+      nassFetchFresh({ ...base, statisticcat_desc: "YIELD" }),
     ]);
     const fipsOf = (row) => (!row.county_code || row.county_code === "998") ? null
       : String(row.state_fips_code).padStart(2, "0") + String(row.county_code).padStart(3, "0");
@@ -449,8 +498,8 @@ app.get("/api/nass/state-acres", async (req, res) => {
   const base = { commodity_desc: crop, agg_level_desc: "STATE", year__GE: "2017" };
   try {
     const [acreRows, yieldRows] = await Promise.all([
-      nassFetch({ ...base, unit_desc: "ACRES" }),        // AREA PLANTED + AREA HARVESTED
-      nassFetch({ ...base, statisticcat_desc: "YIELD" }),
+      nassFetchFresh({ ...base, unit_desc: "ACRES" }),        // AREA PLANTED + AREA HARVESTED
+      nassFetchFresh({ ...base, statisticcat_desc: "YIELD" }),
     ]);
     const states = reduceArea(acreRows, yieldRows,
       (row) => row.state_alpha || null, (row) => ({ state: row.state_alpha }), CROP_YIELD_UNIT[crop]);
@@ -486,8 +535,8 @@ app.get("/api/forecast/rescue", async (req, res) => {
     const isTree = TREE_CROPS.has(crop);
     const [progRows, acreRows, yieldRows, condRows, prodRows] = await Promise.all([
       nassFetchSoft({ ...base, statisticcat_desc: "PROGRESS", unit_desc: "PCT HARVESTED", year__GE: String(nowY - 3) }),
-      nassFetchSoft({ ...base, unit_desc: "ACRES", year__GE: "2017" }),
-      nassFetchSoft({ ...base, statisticcat_desc: "YIELD", year__GE: "2017" }),
+      nassFetchFresh({ ...base, unit_desc: "ACRES", year__GE: "2017" }),
+      nassFetchFresh({ ...base, statisticcat_desc: "YIELD", year__GE: "2017" }),
       nassFetchSoft({ ...base, statisticcat_desc: "CONDITION", year: String(nowY) }),
       isTree ? nassFetchSoft({ ...base, statisticcat_desc: "PRODUCTION", unit_desc: TREE_PROD_UNIT[crop], util_practice_desc: "UTILIZED", class_desc: "ALL CLASSES", year__GE: "2019" }) : Promise.resolve([]),
     ]);
@@ -574,7 +623,11 @@ app.get("/api/forecast/rescue", async (req, res) => {
       const fromCalendar = !curveByState[st] && !!staticCurve;
       const harvestedAcres = Number(a.harvested) || 0;
       const plantedAcres = Number(a.planted) || 0;
-      const yld = Number(a.yield) || 0;
+      // for crops with no isolable fresh series, use the curated fresh-market yield
+      // instead of the processing-dominated ALL-CLASSES live yield (see above).
+      const freshYield = FRESH_YIELD_DEFAULT[crop];
+      const liveYield = Number(a.yield) || 0;
+      const yld = freshYield != null ? freshYield : liveYield;
       const prodAcres = harvestedAcres || plantedAcres;
       const production = isTree ? (Number(a.production) || 0) : (prodAcres * yld);
       const gapAcres = Math.max(0, plantedAcres - harvestedAcres); // abandoned in field
@@ -614,7 +667,8 @@ app.get("/api/forecast/rescue", async (req, res) => {
           : Math.max(0, volume - (availableForRescue || 0));
       }
       states.push({ state: st, year: a.year, harvestedAcres, plantedAcres, gapAcres,
-        yield: yld, yieldUnit: a.yieldUnit, production, windowHarvestPct: windowPct,
+        yield: yld, yieldUnit: a.yieldUnit, yieldSource: freshYield != null ? "fresh-default" : "NASS",
+        production, windowHarvestPct: windowPct,
         windowFromCalendar: fromCalendar,
         volumeEnteringHarvest: volume, conditionRisk: risk, conditionWeek: c ? c.week : null,
         econAbandonRisk, onTreeReturn,
