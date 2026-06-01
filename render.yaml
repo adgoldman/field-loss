@@ -9,6 +9,10 @@ services:
       # Render injects PORT automatically; server.js reads process.env.PORT.
       - key: NODE_VERSION
         value: "20"
-      # Set this in the Render dashboard (Environment → Secret). Do NOT commit it.
+      # Set these in the Render dashboard (Environment → Secret). Do NOT commit them.
+      # NASS_KEY  — USDA NASS Quick Stats (acres, yield, price, progress, condition).
+      # FAS_KEY   — USDA FAS GATS census imports (fresh-import volume / YoY), api.data.gov key.
       - key: NASS_KEY
+        sync: false
+      - key: FAS_KEY
         sync: false
