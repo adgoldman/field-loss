@@ -3,12 +3,14 @@ import Estimator from "./FieldLossEstimator.jsx";
 import MapView from "./FieldLossMap.jsx";
 import County from "./FieldLossCounty.jsx";
 import Forecast from "./FieldLossForecast.jsx";
+import Sources from "./FieldLossSources.jsx";
 
 const TABS = [
   ["Estimator", Estimator],
   ["National map", MapView],
   ["County slice", County],
   ["Rescue forecast", Forecast],
+  ["Data & sources", Sources],
 ];
 
 export default function App() {
