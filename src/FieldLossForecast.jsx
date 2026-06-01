@@ -178,9 +178,9 @@ export default function FieldLossForecast({ importShock = 0, setImportShock }) {
 
       {data.status === "loading" && <p style={{ color: C.sub, fontSize: 13 }}>Loading live NASS progress + condition…</p>}
       {data.status === "error" && <p style={{ color: C.clay, fontSize: 13 }}>Proxy error: {data.error}. Is the proxy running on :8787?</p>}
-      {data.note && <p style={{ color: C.soil, fontSize: 13, background: "#F3EDDD", padding: "8px 10px", borderRadius: 6 }}>{data.note}</p>}
+      {data.status !== "loading" && data.note && <p style={{ color: C.soil, fontSize: 13, background: "#F3EDDD", padding: "8px 10px", borderRadius: 6 }}>{data.note}</p>}
 
-      {rows.length > 0 && (
+      {data.status !== "loading" && rows.length > 0 && (
         <>
           <div style={{ display: "flex", gap: 24, margin: "6px 0 12px", flexWrap: "wrap" }}>
             <Stat label={`Volume entering harvest · next ${horizon}d`} value={`${fmt(totalVol / 1e6, 1)}M ${unit}`} />
@@ -266,6 +266,7 @@ function ImportShockBar({ imp, data, importShock, setImportShock, importTons, is
   const pct = Math.round((importShock || 0) * 100);
   const share = imp?.importShare ?? null;
   const flex = imp?.priceFlex ?? null;
+  const loading = data?.status === "loading";
   const factor = data?.priceFactor != null ? data.priceFactor : 1;
   const live = imp?.live;
   const yoy = live?.yoyPct;
@@ -294,8 +295,8 @@ function ImportShockBar({ imp, data, importShock, setImportShock, importTons, is
           <div style={{ display: "flex", gap: 18, flexWrap: "wrap", marginTop: 10 }}>
             <Mini label="Import share" v={share != null ? `${fmt(share * 100, 0)}%` : "—"} />
             <Mini label="Price flexibility" v={flex != null ? fmt(flex, 1) : "—"} />
-            <Mini label="Price factor" v={`×${fmt(factor, 2)}`} color={factor < 1 ? C.clay : (factor > 1 ? C.field : C.ink)} />
-            <Mini label="Import-driven rescue" v={importTons > 0 ? `${fmt(importTons, 0)} t` : "—"} color={C.clay} />
+            <Mini label="Price factor" v={loading ? "…" : `×${fmt(factor, 2)}`} color={factor < 1 ? C.clay : (factor > 1 ? C.field : C.ink)} />
+            <Mini label="Import-driven rescue" v={loading ? "…" : (importTons > 0 ? `${fmt(importTons, 0)} t` : "—")} color={C.clay} />
           </div>
           <div style={{ fontSize: 11, color: C.sub, marginTop: 8, lineHeight: 1.5, fontFamily: "'IBM Plex Mono', monospace" }}>
             {live

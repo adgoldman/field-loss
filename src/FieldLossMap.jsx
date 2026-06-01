@@ -155,7 +155,7 @@ export default function FieldLossMap({ onDrill, importShock = 0, setImportShock 
     const fallback = () => {
       const byState = {};
       Object.keys(STATES).forEach(s => { byState[s] = { planted: c.natAcres * ((SHARES[crop] || {})[s] || 0) }; });
-      if (!cancelled) setAcresInfo({ status:"fallback", source:"illustrative shares", byState });
+      if (!cancelled) setAcresInfo({ status:"fallback", source:"illustrative shares", byState, crop });
     };
     fetch(`${DEFAULT_PROXY}/api/nass/state-acres?crop=${c.nass}`)
       .then(r => r.ok ? r.json() : Promise.reject())
@@ -165,7 +165,7 @@ export default function FieldLossMap({ onDrill, importShock = 0, setImportShock 
         const byState = {};
         d.states.forEach(x => { if (STATES[x.state]) byState[x.state] = x; });
         if (!Object.keys(byState).length) return fallback();
-        setAcresInfo({ status:"ok", source:`NASS ${d.states[0].year || ""} (live)`, byState });
+        setAcresInfo({ status:"ok", source:`NASS ${d.states[0].year || ""} (live)`, byState, crop });
       })
       .catch(() => !cancelled && fallback());
     return () => { cancelled = true; };
@@ -173,12 +173,13 @@ export default function FieldLossMap({ onDrill, importShock = 0, setImportShock 
 
   // national farm-gate price (NASS PRICE RECEIVED, $/cwt) — drives $ totals and
   // the economic-abandonment fallback; null leaves the static default in place.
+  const [priceCrop, setPriceCrop] = useState(null); // crop the price fetch last settled for
   useEffect(() => {
     let cancelled = false;
     setLivePrice(null);
     fetch(`${DEFAULT_PROXY}/api/price?crop=${CROPS[crop].nass}`)
       .then(r => r.ok ? r.json() : null).catch(() => null)
-      .then(d => { if (!cancelled && d && d.price > 0) setLivePrice(d); });
+      .then(d => { if (!cancelled) { if (d && d.price > 0) setLivePrice(d); setPriceCrop(crop); } });
     return () => { cancelled = true; };
   }, [crop]);
 
@@ -274,6 +275,10 @@ export default function FieldLossMap({ onDrill, importShock = 0, setImportShock 
   const selM = sel && data.out[sel] && data.out[sel].acres ? data.out[sel] : null;
   const selWx = sel ? wx.byState[sel] : null;
   const maxDriver = selM ? Math.max(...selM.drivers.map(d=>d.t)) : 1;
+  // gate the choropleth + state panel until live inputs resolve FOR THE CURRENT crop,
+  // so we never paint tiles from illustrative-share placeholders or values left over
+  // from the previously selected crop that then jump to live NASS figures.
+  const dataReady = acresInfo.crop===crop && priceCrop===crop && (wx.status==="ok"||wx.status==="error");
 
   return (
     <div style={{background:C.paper,color:C.ink,padding:"26px 22px",fontFamily:"'Archivo',system-ui,sans-serif"}}>
@@ -322,6 +327,7 @@ export default function FieldLossMap({ onDrill, importShock = 0, setImportShock 
         {/* shared import-shock lever */}
         <ImportShockBar crop={crop} imp={imp} importShock={importShock} setImportShock={setImportShock} importFactor={importFactor} />
 
+        {dataReady ? (
         <div style={{display:"grid",gridTemplateColumns:"1.35fr 1fr",gap:16}}>
           {/* map */}
           <div className="card" style={{padding:"18px"}}>
@@ -402,6 +408,15 @@ export default function FieldLossMap({ onDrill, importShock = 0, setImportShock 
             )}
           </div>
         </div>
+        ) : (
+          <div className="card" style={{padding:"40px 18px",display:"flex",alignItems:"center",justifyContent:"center",minHeight:240}}>
+            <div className="mono" style={{fontSize:12.5,color:C.sub,display:"flex",alignItems:"center",gap:10}}>
+              <span style={{width:9,height:9,borderRadius:"50%",background:C.gold,display:"inline-block",animation:"flpulse 1s ease-in-out infinite"}}/>
+              Loading live USDA NASS acres + price + weather for {CROPS[crop].label}…
+            </div>
+            <style>{`@keyframes flpulse{0%,100%{opacity:.3}50%{opacity:1}}`}</style>
+          </div>
+        )}
 
         <p style={{fontSize:11.5,color:C.sub,marginTop:14,lineHeight:1.6}}>
           Map blends production × economic abandonment × live weather. Per-state acres are pulled live from

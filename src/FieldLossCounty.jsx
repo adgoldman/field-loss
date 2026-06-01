@@ -223,7 +223,7 @@ export default function FieldLossCounty({ init, importShock = 0, setImportShock 
       const sumA=areas.reduce((a,b)=>a+b,0)||1;
       const stateTotal=CROPS[crop].natAcres*((STATE_SHARE[crop]||{})[stAlpha]||0.05);
       const byFips={}; ids.forEach((id,i)=>{byFips[id]={planted:stateTotal*(areas[i]/sumA)};});
-      if(!cancelled) setAcres({status:"ok",source:"area-weighted estimate",byFips});
+      if(!cancelled) setAcres({status:"ok",source:"area-weighted estimate",byFips,key:`${crop}|${stAlpha}`});
     };
     fetch(`${proxy}/api/nass/county-acres?crop=${CROPS[crop].nass}&state=${stAlpha}`)
       .then(r=>r.ok?r.json():Promise.reject())
@@ -231,7 +231,7 @@ export default function FieldLossCounty({ init, importShock = 0, setImportShock 
         if(cancelled) return;
         if(!d.counties||!d.counties.length) return fallback();
         const byFips={}; d.counties.forEach(c=>{byFips[c.fips]=c;});
-        setAcres({status:"ok",source:`NASS ${d.counties[0].year||""} (live)`,byFips});
+        setAcres({status:"ok",source:`NASS ${d.counties[0].year||""} (live)`,byFips,key:`${crop}|${stAlpha}`});
       })
       .catch(()=>!cancelled&&fallback());
     return ()=>{cancelled=true;};
@@ -239,12 +239,13 @@ export default function FieldLossCounty({ init, importShock = 0, setImportShock 
 
   // national farm-gate price (NASS PRICE RECEIVED, $/cwt) — drives $ totals and
   // the economic-abandonment fallback; null leaves the static default in place.
+  const [priceCrop, setPriceCrop] = useState(null); // crop the price fetch last settled for
   useEffect(()=>{
     let cancelled=false;
     setLivePrice(null);
     fetch(`${proxy}/api/price?crop=${CROPS[crop].nass}`)
       .then(r=>r.ok?r.json():null).catch(()=>null)
-      .then(d=>{ if(!cancelled && d && d.price>0) setLivePrice(d); });
+      .then(d=>{ if(!cancelled){ if(d && d.price>0) setLivePrice(d); setPriceCrop(crop); } });
     return ()=>{cancelled=true;};
   }, [crop, proxy]);
 
@@ -310,6 +311,10 @@ export default function FieldLossCounty({ init, importShock = 0, setImportShock 
   const maxDriver = selM?Math.max(...selM.drivers.map(d=>d.t)):1;
   const metricLabel = metric==="tons"?"tons lost":metric==="usd"?"value lost":"% of production";
   const withData = geo.features.filter(f=>data.out[f.id]&&data.out[f.id].acres>0).length;
+  // gate the choropleth fill + county panel until live inputs resolve FOR THE CURRENT
+  // crop+state, so counties aren't colored from placeholder acres/price or values left
+  // over from the previously selected crop/state that then jump to live NASS values.
+  const dataReady = geo.status==="ok" && acres.key===`${crop}|${stAlpha}` && priceCrop===crop && (wx.status==="ok"||wx.status==="error");
 
   return (
     <div style={{background:C.paper,color:C.ink,padding:"26px 22px",fontFamily:"'Archivo',system-ui,sans-serif"}}>
@@ -358,13 +363,20 @@ export default function FieldLossCounty({ init, importShock = 0, setImportShock 
             {geo.status==="ok"&&path&&(
               <svg viewBox={`0 0 ${W} ${H}`} style={{width:"100%",height:"auto",display:"block"}}>
                 {geo.features.map(f=>(
-                  <path key={f.id} className="cty" d={path(f)} fill={colorOf(f.id)}
+                  <path key={f.id} className="cty" d={path(f)} fill={dataReady?colorOf(f.id):"#E9E3D2"}
                     stroke={sel===f.id?C.ink:"#fff"} strokeWidth={sel===f.id?1.6:0.4}
-                    onClick={()=>setSel(f.id)}>
+                    onClick={()=>dataReady&&setSel(f.id)}>
                     <title>{nmeById[f.id]}</title>
                   </path>
                 ))}
               </svg>
+            )}
+            {geo.status==="ok"&&!dataReady&&(
+              <div className="mono" style={{fontSize:11.5,color:C.sub,marginTop:10,display:"flex",alignItems:"center",gap:8}}>
+                <span style={{width:8,height:8,borderRadius:"50%",background:C.gold,display:"inline-block",animation:"flpulse 1s ease-in-out infinite"}}/>
+                Loading live county acres + price + weather…
+                <style>{`@keyframes flpulse{0%,100%{opacity:.3}50%{opacity:1}}`}</style>
+              </div>
             )}
             <div style={{display:"flex",alignItems:"center",gap:10,marginTop:12}}>
               <span className="mono" style={{fontSize:10.5,color:C.sub}}>low</span>
@@ -374,8 +386,9 @@ export default function FieldLossCounty({ init, importShock = 0, setImportShock 
           </div>
 
           <div className="card" style={{padding:"18px"}}>
-            {!selM&&<P>Select a county with modeled production.</P>}
-            {selM&&(<>
+            {!dataReady&&<P>Loading live USDA data for {CROPS[crop].label} · {SLICE_STATES[stAlpha].name}…</P>}
+            {dataReady&&!selM&&<P>Select a county with modeled production.</P>}
+            {dataReady&&selM&&(<>
               <div className="mono" style={{fontSize:11,letterSpacing:1,color:C.field,textTransform:"uppercase"}}>{nmeById[sel]} County</div>
               <div style={{display:"flex",gap:18,margin:"10px 0 16px"}}>
                 <Big label="Loss" value={fmt(selM.totalTons)+" t"} color={C.clay}/>

@@ -151,6 +151,9 @@ export default function FieldLossEstimator({ importShock = 0, setImportShock }) 
   // Live model inputs from USDA NASS (same-origin proxy): acreage + yield for the
   // selected state, and national farm-gate price. All remain editable overrides.
   const [nassMsg, setNassMsg] = useState("");
+  // the crop|state the live NASS data corresponds to; compared against the current
+  // selection so readiness flips false the instant the user switches (no stale frame).
+  const [loadedKey, setLoadedKey] = useState(null);
   useEffect(() => {
     let cancelled = false;
     const c = CROPS[cropKey];
@@ -181,9 +184,15 @@ export default function FieldLossEstimator({ importShock = 0, setImportShock }) 
       if (pr && pr.price > 0) { setA((a) => ({ ...a, price: pr.price })); parts.push(`price $${pr.price}/cwt (${pr.year})`); }
       else setA((a) => ({ ...a, price: c.price }));
       setNassMsg(parts.length ? `Live from USDA NASS: ${parts.join(" · ")}. Editable below.` : "No live data for this crop/state — using defaults.");
+      setLoadedKey(`${cropKey}|${stateCode}`);
     });
     return () => { cancelled = true; };
   }, [cropKey, stateCode]);
+
+  // Results render only once live inputs (NASS acres/price + weather) have resolved
+  // for the CURRENT selection, so we never flash loss figures computed from seed
+  // defaults or stale values left over from the previously selected crop/state.
+  const resultsReady = loadedKey === `${cropKey}|${stateCode}` && (wx.status === "ok" || wx.status === "error");
 
   // ---- the model ----
   const m = useMemo(() => {
@@ -260,28 +269,36 @@ export default function FieldLossEstimator({ importShock = 0, setImportShock }) 
         </div>
 
         {/* headline result */}
-        <div className="card" style={{ padding: "20px 22px", marginBottom: 16, display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
-          <Stat big label="Est. on-farm loss" value={fmt(m.totalTons) + " t"} sub={`${fmt(m.pct * 100, 1)}% of production`} color={C.clay} />
-          <Stat label="Value lost" value={usd(m.totalUSD)} sub={`@ $${a.price}/${unit}`} />
-          <Stat label="Gross production" value={fmt(m.gross / 1000) + "k " + unit} sub={`${fmt(acres)} ac × ${a.yield}`} />
-          <Stat label="Abandonment rate" value={fmt(m.fAband * 100, 1) + "%"} sub={m.marginRatio < 0 ? "negative margin" : `${fmt(m.marginRatio * 100, 0)}% margin`} color={m.fAband > 0.2 ? C.clay : C.field} />
-        </div>
+        {resultsReady ? (
+          <div className="card" style={{ padding: "20px 22px", marginBottom: 16, display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 16 }}>
+            <Stat big label="Est. on-farm loss" value={fmt(m.totalTons) + " t"} sub={`${fmt(m.pct * 100, 1)}% of production`} color={C.clay} />
+            <Stat label="Value lost" value={usd(m.totalUSD)} sub={`@ $${a.price}/${unit}`} />
+            <Stat label="Gross production" value={fmt(m.gross / 1000) + "k " + unit} sub={`${fmt(acres)} ac × ${a.yield}`} />
+            <Stat label="Abandonment rate" value={fmt(m.fAband * 100, 1) + "%"} sub={m.marginRatio < 0 ? "negative margin" : `${fmt(m.marginRatio * 100, 0)}% margin`} color={m.fAband > 0.2 ? C.clay : C.field} />
+          </div>
+        ) : (
+          <LoadingCard height={92} label={`Loading live USDA data for ${CROPS[cropKey].label} · ${STATE_NAMES[stateCode]}…`} />
+        )}
 
         {/* chart + drivers */}
         <div style={{ display: "grid", gridTemplateColumns: "1.2fr 1fr", gap: 16, marginBottom: 16 }}>
           <div className="card" style={{ padding: "18px 18px 8px" }}>
             <SectionTitle>Where the crop goes (tons · sums to 100%)</SectionTitle>
-            <ResponsiveContainer width="100%" height={210}>
-              <BarChart data={m.parts} layout="vertical" margin={{ left: 8, right: 40, top: 6, bottom: 0 }}>
-                <XAxis type="number" hide />
-                <YAxis type="category" dataKey="key" width={150} tick={{ fontSize: 11, fill: C.ink }} axisLine={false} tickLine={false} />
-                <Tooltip formatter={(v) => fmt(v) + " t"} cursor={{ fill: "rgba(0,0,0,0.04)" }} />
-                <Bar dataKey="tons" radius={[0, 4, 4, 0]}>
-                  {m.parts.map((p, i) => <Cell key={i} fill={p.color} />)}
-                  <LabelList dataKey="tons" position="right" formatter={(v) => fmt(v)} style={{ fontSize: 11, fill: C.sub }} />
-                </Bar>
-              </BarChart>
-            </ResponsiveContainer>
+            {resultsReady ? (
+              <ResponsiveContainer width="100%" height={210}>
+                <BarChart data={m.parts} layout="vertical" margin={{ left: 8, right: 40, top: 6, bottom: 0 }}>
+                  <XAxis type="number" hide />
+                  <YAxis type="category" dataKey="key" width={150} tick={{ fontSize: 11, fill: C.ink }} axisLine={false} tickLine={false} />
+                  <Tooltip formatter={(v) => fmt(v) + " t"} cursor={{ fill: "rgba(0,0,0,0.04)" }} />
+                  <Bar dataKey="tons" radius={[0, 4, 4, 0]}>
+                    {m.parts.map((p, i) => <Cell key={i} fill={p.color} />)}
+                    <LabelList dataKey="tons" position="right" formatter={(v) => fmt(v)} style={{ fontSize: 11, fill: C.sub }} />
+                  </Bar>
+                </BarChart>
+              </ResponsiveContainer>
+            ) : (
+              <div style={{ height: 210, display: "flex", alignItems: "center", justifyContent: "center", color: C.sub, fontSize: 13 }} className="mono">Waiting for live data…</div>
+            )}
           </div>
 
           {/* weather panel */}
@@ -331,8 +348,8 @@ export default function FieldLossEstimator({ importShock = 0, setImportShock }) 
               <div>Import share of US supply: <b>{importShare > 0 ? fmt(importShare * 100) + "%" : "—"}</b></div>
               <div>Price flexibility: <b>{imp ? priceFlex : "—"}</b></div>
               <div>Price factor: <b style={{ color: priceFactor < 1 ? C.clay : priceFactor > 1 ? C.field : C.ink }}>×{fmt(priceFactor, 2)}</b></div>
-              <div>Effective price: <b>${fmt(effPrice, 2)}</b><span style={{ color: C.sub }}> (base ${fmt(a.price, 2)})</span></div>
-              <div>Economic abandonment: <b style={{ color: C.soil }}>{fmt(m.fAband * 100, 1)}%</b></div>
+              <div>Effective price: <b>{resultsReady ? `$${fmt(effPrice, 2)}` : "—"}</b>{resultsReady && <span style={{ color: C.sub }}> (base ${fmt(a.price, 2)})</span>}</div>
+              <div>Economic abandonment: <b style={{ color: C.soil }}>{resultsReady ? `${fmt(m.fAband * 100, 1)}%` : "—"}</b></div>
             </div>
           </div>
           <p style={{ fontSize: 11, color: C.sub, margin: "12px 0 0" }} className="mono">
@@ -405,6 +422,17 @@ function Field({ label, children }) {
 }
 function SectionTitle({ children }) {
   return <div className="mono" style={{ fontSize: 11, letterSpacing: 1, color: C.field, textTransform: "uppercase", marginBottom: 14 }}>{children}</div>;
+}
+function LoadingCard({ height = 80, label }) {
+  return (
+    <div className="card" style={{ padding: "20px 22px", marginBottom: 16, minHeight: height, display: "flex", alignItems: "center", justifyContent: "center" }}>
+      <div className="mono" style={{ fontSize: 12.5, color: C.sub, display: "flex", alignItems: "center", gap: 10 }}>
+        <span style={{ width: 9, height: 9, borderRadius: "50%", background: C.gold, display: "inline-block", animation: "flpulse 1s ease-in-out infinite" }} />
+        {label || "Loading live data…"}
+      </div>
+      <style>{`@keyframes flpulse{0%,100%{opacity:.3}50%{opacity:1}}`}</style>
+    </div>
+  );
 }
 function Stat({ label, value, sub, color, big }) {
   return (
