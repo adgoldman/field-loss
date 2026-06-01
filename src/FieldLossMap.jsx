@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useMemo } from "react";
+import { NAT_ACRES, STATE_SHARES } from "./cropBaselines.js";
 
 /*
   Field Loss Map (US prototype)
@@ -13,11 +14,11 @@ import React, { useState, useEffect, useMemo } from "react";
 */
 
 const CROPS = {
-  potatoes:    { label: "Potatoes",        nass:"POTATOES",    nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 440, price: 10.50, harvestCost: 7.50, baseLoss: 0.040, perish: 0.50, natAcres: 920_000 },
-  tomatoes:    { label: "Tomatoes (fresh)",nass:"TOMATOES",    nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 350, price: 38.0,  harvestCost: 26.0, baseLoss: 0.100, perish: 0.90, natAcres: 95_000 },
-  lettuce:     { label: "Lettuce",         nass:"LETTUCE",     nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 360, price: 22.0,  harvestCost: 15.0, baseLoss: 0.110, perish: 0.95, natAcres: 250_000 },
-  apples:      { label: "Apples",          nass:"APPLES",      nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 380, price: 30.0,  harvestCost: 20.0, baseLoss: 0.080, perish: 0.80, natAcres: 290_000 },
-  strawberries:{ label: "Strawberries",    nass:"STRAWBERRIES",nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 500, price: 90.0,  harvestCost: 60.0, baseLoss: 0.120, perish: 1.00, natAcres: 52_000 },
+  potatoes:    { label: "Potatoes",        nass:"POTATOES",    nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 440, price: 10.50, harvestCost: 7.50, baseLoss: 0.040, perish: 0.50 },
+  tomatoes:    { label: "Tomatoes (fresh)",nass:"TOMATOES",    nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 350, price: 38.0,  harvestCost: 26.0, baseLoss: 0.100, perish: 0.90 },
+  lettuce:     { label: "Lettuce",         nass:"LETTUCE",     nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 360, price: 22.0,  harvestCost: 15.0, baseLoss: 0.110, perish: 0.95 },
+  apples:      { label: "Apples",          nass:"APPLES",      nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 380, price: 30.0,  harvestCost: 20.0, baseLoss: 0.080, perish: 0.80 },
+  strawberries:{ label: "Strawberries",    nass:"STRAWBERRIES",nassStat:"AREA HARVESTED", unit: "cwt", lbs: 100, yield: 500, price: 90.0,  harvestCost: 60.0, baseLoss: 0.120, perish: 1.00 },
 };
 
 // Same-origin: dev → Vite proxies /api to :8787; prod → Express serves /api directly.
@@ -26,14 +27,9 @@ const DEFAULT_PROXY = "";
 // NASS harvested-but-unsold rate (mirrors server UNSOLD_RATE); unlisted crops ~0.
 const UNSOLD = { potatoes: 0.055, tomatoes: 0.006, apples: 0.034 };
 
-// Illustrative production shares (sum ~1; unlisted states = 0). Replace with NASS.
-const SHARES = {
-  potatoes: { ID:.31, WA:.145, WI:.065, ND:.065, CO:.05, OR:.045, MN:.045, MI:.045, ME:.04, CA:.035, NE:.03, TX:.02 },
-  tomatoes: { CA:.42, FL:.30, IN:.05, OH:.04, MI:.03, TN:.03, VA:.025, NC:.02, NJ:.02, PA:.02, GA:.015 },
-  lettuce: { CA:.70, AZ:.25, FL:.02, NJ:.006, NY:.006, CO:.005, WA:.005, MI:.003 },
-  apples: { WA:.55, NY:.12, MI:.10, PA:.045, CA:.045, VA:.025, OR:.02, NC:.015, OH:.01 },
-  strawberries: { CA:.87, FL:.085, OR:.01, NC:.008, NY:.005, WA:.005, MI:.004, PA:.003 },
-};
+// National acreage + state shares now live in cropBaselines.js (shared with the
+// Estimator + County), so the illustrative-share fallback is identical everywhere.
+const SHARES = STATE_SHARES;
 
 const STATES = {
   AL:[32.8,-86.8],AK:[64.1,-152.3],AZ:[34.2,-111.7],AR:[34.9,-92.4],CA:[37.2,-119.4],
@@ -143,7 +139,7 @@ export default function FieldLossMap({ onDrill, importShock = 0, setImportShock 
   // per-state area: live NASS {planted,harvested,yield} via proxy, SHARES as fallback
   const [acresInfo, setAcresInfo] = useState(() => {
     const byState = {};
-    Object.keys(STATES).forEach(s => { byState[s] = { planted: CROPS.tomatoes.natAcres * ((SHARES.tomatoes || {})[s] || 0) }; });
+    Object.keys(STATES).forEach(s => { byState[s] = { planted: NAT_ACRES.tomatoes * ((SHARES.tomatoes || {})[s] || 0) }; });
     return { status:"idle", source:"illustrative shares", byState };
   });
 
@@ -154,7 +150,7 @@ export default function FieldLossMap({ onDrill, importShock = 0, setImportShock 
     setAcresInfo(a => ({ ...a, status:"loading", source:"…" }));
     const fallback = () => {
       const byState = {};
-      Object.keys(STATES).forEach(s => { byState[s] = { planted: c.natAcres * ((SHARES[crop] || {})[s] || 0) }; });
+      Object.keys(STATES).forEach(s => { byState[s] = { planted: NAT_ACRES[crop] * ((SHARES[crop] || {})[s] || 0) }; });
       if (!cancelled) setAcresInfo({ status:"fallback", source:"illustrative shares", byState, crop });
     };
     fetch(`${DEFAULT_PROXY}/api/nass/state-acres?crop=${c.nass}`)

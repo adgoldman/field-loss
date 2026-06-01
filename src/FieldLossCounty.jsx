@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useMemo, useRef } from "react";
 import * as d3 from "d3";
+import { NAT_ACRES, STATE_SHARES } from "./cropBaselines.js";
 
 /*
   Field Loss — County Vertical Slice
@@ -21,20 +22,16 @@ const DEFAULT_PROXY = "";
 const UNSOLD = { potatoes: 0.055, tomatoes: 0.006, apples: 0.034 };
 
 const CROPS = {
-  potatoes:    { label:"Potatoes",         nass:"POTATOES",    nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:440, price:10.50, harvestCost:7.50, baseLoss:0.040, perish:0.50, natAcres:920_000 },
-  tomatoes:    { label:"Tomatoes (fresh)", nass:"TOMATOES",    nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:350, price:38.0,  harvestCost:26.0, baseLoss:0.100, perish:0.90, natAcres:95_000 },
-  lettuce:     { label:"Lettuce",          nass:"LETTUCE",     nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:360, price:22.0,  harvestCost:15.0, baseLoss:0.110, perish:0.95, natAcres:250_000 },
-  apples:      { label:"Apples",           nass:"APPLES",      nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:380, price:30.0,  harvestCost:20.0, baseLoss:0.080, perish:0.80, natAcres:290_000 },
-  strawberries:{ label:"Strawberries",     nass:"STRAWBERRIES",nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:500, price:90.0,  harvestCost:60.0, baseLoss:0.120, perish:1.00, natAcres:52_000 },
+  potatoes:    { label:"Potatoes",         nass:"POTATOES",    nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:440, price:10.50, harvestCost:7.50, baseLoss:0.040, perish:0.50 },
+  tomatoes:    { label:"Tomatoes (fresh)", nass:"TOMATOES",    nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:350, price:38.0,  harvestCost:26.0, baseLoss:0.100, perish:0.90 },
+  lettuce:     { label:"Lettuce",          nass:"LETTUCE",     nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:360, price:22.0,  harvestCost:15.0, baseLoss:0.110, perish:0.95 },
+  apples:      { label:"Apples",           nass:"APPLES",      nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:380, price:30.0,  harvestCost:20.0, baseLoss:0.080, perish:0.80 },
+  strawberries:{ label:"Strawberries",     nass:"STRAWBERRIES",nassStat:"AREA HARVESTED", unit:"cwt", lbs:100, yield:500, price:90.0,  harvestCost:60.0, baseLoss:0.120, perish:1.00 },
 };
 // state-level share of national acres (for fallback sizing only; from the national view)
-const STATE_SHARE = {
-  potatoes: { ID:.31, WA:.145, WI:.065, ND:.065, CO:.05, OR:.045, MN:.045, MI:.045, ME:.04, CA:.035, NE:.03, TX:.02 },
-  tomatoes: { CA:.42, FL:.30, IN:.05, OH:.04, MI:.03, TN:.03, VA:.025, NC:.02, NJ:.02, PA:.02, GA:.015 },
-  lettuce: { CA:.70, AZ:.25, FL:.02, NJ:.006, NY:.006, CO:.005, WA:.005, MI:.003 },
-  apples: { WA:.55, NY:.12, MI:.10, PA:.045, CA:.045, VA:.025, OR:.02, NC:.015, OH:.01 },
-  strawberries: { CA:.87, FL:.085, OR:.01, NC:.008, NY:.005, WA:.005, MI:.004, PA:.003 },
-};
+// National acreage + state shares now live in cropBaselines.js (shared with the
+// National map + Estimator), so the fallback estimate is identical everywhere.
+const STATE_SHARE = STATE_SHARES;
 // every state (alpha -> {fips, name}); the national map drills into any of these.
 const SLICE_STATES = {
   AL:{fips:"01",name:"Alabama"}, AK:{fips:"02",name:"Alaska"}, AZ:{fips:"04",name:"Arizona"}, AR:{fips:"05",name:"Arkansas"},
@@ -221,7 +218,7 @@ export default function FieldLossCounty({ init, importShock = 0, setImportShock 
       const featById={}; geo.features.forEach(f=>featById[f.id]=f);
       const areas=ids.map(id=>d3.geoArea(featById[id])||0);
       const sumA=areas.reduce((a,b)=>a+b,0)||1;
-      const stateTotal=CROPS[crop].natAcres*((STATE_SHARE[crop]||{})[stAlpha]||0.05);
+      const stateTotal=NAT_ACRES[crop]*((STATE_SHARE[crop]||{})[stAlpha]||0.05);
       const byFips={}; ids.forEach((id,i)=>{byFips[id]={planted:stateTotal*(areas[i]/sumA)};});
       if(!cancelled) setAcres({status:"ok",source:"area-weighted estimate",byFips,key:`${crop}|${stAlpha}`});
     };

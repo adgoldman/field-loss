@@ -90,7 +90,7 @@ const CURATED = [
   {
     name: "Geographic share fallbacks",
     color: C.sub,
-    detail: "Illustrative national-acreage shares (state) and area-weighted distribution (county) used only when the live NASS call returns nothing — always labeled as such in the UI.",
+    detail: "National acreage × each state's production share — the crop+state acreage estimate used only when the live NASS call returns nothing (Estimator + National map; County adds area-weighting). One shared source of truth, always labeled 'estimate' in the UI.",
   },
 ];
 

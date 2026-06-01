@@ -2,6 +2,7 @@ import React, { useState, useEffect, useMemo } from "react";
 import {
   BarChart, Bar, XAxis, YAxis, Cell, ResponsiveContainer, Tooltip, LabelList,
 } from "recharts";
+import { estimateStateAcres } from "./cropBaselines.js";
 
 /*
   On-Farm Food Loss Estimator (US prototype)
@@ -74,8 +75,10 @@ function clamp(x, lo, hi) { return Math.max(lo, Math.min(hi, x)); }
 export default function FieldLossEstimator({ importShock = 0, setImportShock }) {
   const [cropKey, setCropKey] = useState("tomatoes");
   const [stateCode, setStateCode] = useState("CA");
-  const [acres, setAcres] = useState(20000);
-  const [acresSource, setAcresSource] = useState("manual"); // manual | nass | sample
+  // No fabricated default: acres starts empty and is filled from live NASS, or from
+  // a crop+state estimate (national acreage × state share) when NASS has none.
+  const [acres, setAcres] = useState(null);
+  const [acresSource, setAcresSource] = useState("loading…"); // loading… | nass | est · state share | manual
 
   // editable assumptions, seeded from crop defaults
   const base = CROPS[cropKey];
@@ -165,9 +168,18 @@ export default function FieldLossEstimator({ importShock = 0, setImportShock }) 
       if (cancelled) return;
       const parts = [];
       const row = sa && (sa.states || []).find((s) => s.state === stateCode);
-      // acreage: planted preferred, harvested fallback (tree crops report harvested)
+      // acreage: planted preferred, harvested fallback (tree crops report harvested).
+      // No live figure → crop+state estimate (national acreage × state share), the
+      // same logic the National map / County tabs use; never a fabricated flat value.
       const ac = row ? (Number(row.planted) || Number(row.harvested) || 0) : 0;
-      if (ac > 0) { setAcres(ac); setAcresSource("nass"); parts.push(`${row.year} ${row.planted ? "planted" : "harvested"} acres`); }
+      if (ac > 0) {
+        setAcres(ac); setAcresSource("nass");
+        parts.push(`${row.year} ${row.planted ? "planted" : "harvested"} acres`);
+      } else {
+        const est = estimateStateAcres(cropKey, stateCode);
+        setAcres(est); setAcresSource("est · state share");
+        parts.push(`acres estimated from state share (no live NASS acreage)`);
+      }
       // yield — only when the NASS unit matches the crop's display unit (e.g. CWT).
       // For crops NASS reports only as ALL CLASSES (fresh + processing combined,
       // e.g. tomatoes), the live per-acre yield is processing-dominated, so we keep
@@ -183,7 +195,7 @@ export default function FieldLossEstimator({ importShock = 0, setImportShock }) 
       // national farm-gate price ($/cwt)
       if (pr && pr.price > 0) { setA((a) => ({ ...a, price: pr.price })); parts.push(`price $${pr.price}/cwt (${pr.year})`); }
       else setA((a) => ({ ...a, price: c.price }));
-      setNassMsg(parts.length ? `Live from USDA NASS: ${parts.join(" · ")}. Editable below.` : "No live data for this crop/state — using defaults.");
+      setNassMsg(parts.length ? `Model inputs · ${parts.join(" · ")}. Editable below.` : "No live data for this crop/state.");
       setLoadedKey(`${cropKey}|${stateCode}`);
     });
     return () => { cancelled = true; };
@@ -264,7 +276,7 @@ export default function FieldLossEstimator({ importShock = 0, setImportShock }) 
             </select>
           </Field>
           <Field label={`Planted acres · ${acresSource}`}>
-            <input type="number" value={acres} onChange={(e) => { setAcres(Number(e.target.value)); setAcresSource("manual"); }} style={selStyle} />
+            <input type="number" value={acres ?? ""} placeholder="enter acres" onChange={(e) => { setAcres(e.target.value === "" ? null : Number(e.target.value)); setAcresSource("manual"); }} style={selStyle} />
           </Field>
         </div>
 
